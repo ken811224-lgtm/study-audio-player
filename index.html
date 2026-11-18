@@ -68,7 +68,7 @@
 
   <section id="tab-list" class="tabpane">
     <div class="import-box">
-      <input id="importSubject" class="input" list="subjectList" placeholder="科目名（例：民法）" autocomplete="off">
+      <input id="importSubject" class="input" list="subjectList" placeholder="科目名（ファイル名で分からないときだけ）" autocomplete="off">
       <datalist id="subjectList"></datalist>
       <label class="btn primary file-btn">＋ MP3を取り込む
         <input id="fileInput" type="file" accept="audio/*,.mp3,.m4a" multiple>
@@ -139,7 +139,7 @@
     <label class="field">今日の目標（分）
       <input id="sGoal" class="input" type="number" min="1" max="600" inputmode="numeric">
     </label>
-    <label class="field">取り込むときの科目名（決まった科目があれば）
+    <label class="field">取り込むときの科目名（ファイル名が「科目＜コース＞番号 題名」の形でないときに使う）
       <input id="sSubject" class="input" placeholder="例：不動産登記法">
     </label>
     <label class="check"><input id="sAutoNext" type="checkbox"> 終わったら次の音声を続けて再生</label>

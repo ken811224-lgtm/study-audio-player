@@ -17,8 +17,8 @@ var SECRET = '';
 var LOG_SHEET = '再生ログ';
 var MASTER_SHEET = '単元マスタ';
 var DAILY_SHEET = '日別';
-var LOG_HEAD = ['ログID', '日時', '科目', '番号', 'ファイル名', 'できごと', '聴取(秒)', '講義時間(秒)', '周回数', '理解度', '受信日時'];
-var MASTER_HEAD = ['科目', '番号', 'ファイル名', '周回数', '累積実時間(分)', '累積講義時間(分)', '最終聴取日', '理解度', '更新日時'];
+var LOG_HEAD = ['ログID', '日時', '科目', 'コース', '番号', '題名', 'ファイル名', 'できごと', '聴取(秒)', '講義時間(秒)', '周回数', '理解度', '受信日時'];
+var MASTER_HEAD = ['科目', 'コース', '番号', '題名', 'ファイル名', '周回数', '累積実時間(分)', '累積講義時間(分)', '最終聴取日', '理解度', '更新日時'];
 var DAILY_HEAD = ['日付', '実聴取(分)', '講義時間(分)', '更新日時'];
 var EVENT_NAME = {
   pause: '一時停止', ended: '最後まで', complete: '周回 +1', 'switch': '曲を変えた', stop: '停止',
@@ -84,7 +84,7 @@ function appendLogs_(ss, logs) {
     if (!l || !l.id || seen[l.id]) return;
     seen[l.id] = true;
     rows.push([
-      l.id, toDate_(l.timestamp), l.subject || '', l.no || '', l.fileName || '',
+      l.id, toDate_(l.timestamp), l.subject || '', l.course || '', l.no || '', l.title || '', l.fileName || '',
       EVENT_NAME[l.event] || l.event || '', Number(l.listenedSeconds) || 0, Number(l.lectureSeconds) || 0,
       Number(l.playCount) || 0, l.status || '', now
     ]);
@@ -99,20 +99,20 @@ function updateMaster_(ss, logs) {
   var last = sh.getLastRow();
   var data = last > 1 ? sh.getRange(2, 1, last - 1, MASTER_HEAD.length).getValues() : [];
   var index = {};
-  data.forEach(function (r, i) { index[r[0] + '\t' + r[2]] = i; });
+  data.forEach(function (r, i) { index[r[4]] = i; });   // ファイル名で照らす
 
   // 同じ単元のログは、いちばん新しいものだけを使う
   var latest = {};
   logs.forEach(function (l) {
     if (!l || !l.fileName) return;
-    var k = (l.subject || '') + '\t' + l.fileName;
+    var k = l.fileName;
     if (!latest[k] || String(l.timestamp) >= String(latest[k].timestamp)) latest[k] = l;
   });
   var now = new Date();
   Object.keys(latest).forEach(function (k) {
     var l = latest[k];
     var row = [
-      l.subject || '', l.no || '', l.fileName,
+      l.subject || '', l.course || '', l.no || '', l.title || '', l.fileName,
       Number(l.playCount) || 0,
       Math.round((Number(l.totalListenedSeconds) || 0) / 6) / 10,
       Math.round((Number(l.totalLectureSeconds) || 0) / 6) / 10,
@@ -127,7 +127,8 @@ function updateMaster_(ss, logs) {
   });
   data.sort(function (a, b) {
     if (a[0] !== b[0]) return String(a[0]) < String(b[0]) ? -1 : 1;
-    return (Number(a[1]) || 0) - (Number(b[1]) || 0);
+    if (a[1] !== b[1]) return String(a[1]) < String(b[1]) ? -1 : 1;
+    return (Number(a[2]) || 0) - (Number(b[2]) || 0);
   });
   if (data.length) sh.getRange(2, 1, data.length, MASTER_HEAD.length).setValues(data);
 }

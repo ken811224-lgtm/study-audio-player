@@ -5,7 +5,7 @@
 (function () {
   'use strict';
 
-  var APP_VERSION = '1.0.0';
+  var APP_VERSION = '1.1.0';
   var RATES = [1.0, 1.3, 1.5, 1.8, 2.0, 2.2];
   var STATUS_LIST = [
     { key: 'none', label: '未評価', mark: '' },
@@ -67,6 +67,21 @@
     }
     return x.length - y.length;
   }
+
+  /* ---------- ファイル名から 科目・コース・題名 を読む ----------
+   * 例「不動産登記法＜基礎＞1 所有権に関する登記（1）.mp3」
+   *   → 科目「不動産登記法」・コース「基礎」・題名「1 所有権に関する登記（1）」
+   * ＜＞ のほか <> 〈〉 《》 【】 [] でもよい。形が合わないときは取り込み欄の科目名（なければ「未分類」）
+   */
+  var NAME_PAT = /^(.+?)\s*[＜<〈《【\[]\s*([^＜<＞>〈〉《》【】\[\]]+?)\s*[＞>〉》】\]]\s*(.*)$/;
+  function parseName(fileName) {
+    var base = String(fileName).replace(/\.[^.]+$/, '').trim();
+    var m = base.match(NAME_PAT);
+    if (!m || !m[1].trim()) return null;
+    return { subject: m[1].trim(), course: m[2].trim(), title: m[3].trim() || base };
+  }
+  function groupOf(t) { return t.subject + (t.course ? '＜' + t.course + '＞' : ''); }
+  function titleOf(t) { return t.title || t.name.replace(/\.[^.]+$/, ''); }
 
   /* ---------- 設定・記録（localStorage） ---------- */
   var settings = lsGet(K.settings, {});
@@ -136,21 +151,47 @@
   function sortTracks() {
     tracks.sort(function (a, b) {
       if (a.subject !== b.subject) return natcmp(a.subject, b.subject);
+      if ((a.course || '') !== (b.course || '')) return natcmp(a.course || '', b.course || '');
       return (a.no || 0) - (b.no || 0);
     });
     byId = {};
     tracks.forEach(function (t) { byId[t.id] = t; });
   }
-  function renumber(subject) {
-    var list = tracks.filter(function (t) { return t.subject === subject; });
+  function renumber(group) {
+    var list = tracks.filter(function (t) { return groupOf(t) === group; });
     list.sort(function (a, b) { return natcmp(a.name, b.name); });
-    list.forEach(function (t, i) { t.no = i + 1; });
+    // 題名の頭に講義番号（「10 抵当権」の 10）が全部に付いていて重ならなければ、それを番号にする
+    var nums = list.map(function (t) {
+      var m = String(titleOf(t)).replace(/[０-９]/g, function (c) { return String.fromCharCode(c.charCodeAt(0) - 0xFEE0); }).match(/^第?(\d+)/);
+      return m ? parseInt(m[1], 10) : null;
+    });
+    var seen = {}, useNum = list.length > 0;
+    nums.forEach(function (n) { if (n === null || seen[n]) useNum = false; else seen[n] = 1; });
+    list.forEach(function (t, i) { t.no = useNum ? nums[i] : i + 1; });
     return list;
   }
   function subjects() {
     var seen = {}, out = [];
     tracks.forEach(function (t) { if (!seen[t.subject]) { seen[t.subject] = 1; out.push(t.subject); } });
     return out.sort(natcmp);
+  }
+  function groups() {
+    // 並び順（科目→コース）のまま「科目＜コース＞」の一覧
+    var seen = {}, out = [];
+    tracks.forEach(function (t) { var g = groupOf(t); if (!seen[g]) { seen[g] = 1; out.push(g); } });
+    return out;
+  }
+  function coursesOf(subject) {
+    var seen = {}, out = [];
+    tracks.forEach(function (t) { if (t.subject === subject && !seen[t.course || '']) { seen[t.course || ''] = 1; out.push(t.course || ''); } });
+    return out;
+  }
+  // 絞り込みの値：'' すべて／'s:科目' 科目まるごと／'g:科目＜コース＞'
+  function matchFilter(t, v) {
+    if (!v) return true;
+    if (v.indexOf('s:') === 0) return t.subject === v.slice(2);
+    if (v.indexOf('g:') === 0) return groupOf(t) === v.slice(2);
+    return groupOf(t) === v;
   }
   var dirty = {};
   function markDirty(t) { dirty[t.id] = t; }
@@ -165,6 +206,7 @@
 
   async function importFiles(fileList, subject) {
     subject = (subject || '').trim() || '未分類';
+    var touched = {}, lastGroup = '';
     var files = [].slice.call(fileList).filter(function (f) {
       return /^audio\//.test(f.type) || /\.(mp3|m4a|aac|wav|ogg)$/i.test(f.name);
     });
@@ -174,7 +216,9 @@
     var added = 0, skipped = 0;
     for (var i = 0; i < files.length; i++) {
       var f = files[i];
-      var exists = tracks.some(function (t) { return t.subject === subject && t.name === f.name; });
+      var pn = parseName(f.name);
+      var info = pn || { subject: subject, course: '', title: f.name.replace(/\.[^.]+$/, '') };
+      var exists = tracks.some(function (t) { return t.subject === info.subject && (t.course || '') === info.course && t.name === f.name; });
       if (exists) { skipped++; continue; }
       toast('取り込み中 ' + (i + 1) + ' / ' + files.length, 60000);
       try {
@@ -183,12 +227,14 @@
         await idbPut('audio', { id: id, type: f.type || 'audio/mpeg', data: buf });
         buf = null;
         var t = {
-          id: id, subject: subject, name: f.name, no: 0, size: f.size, duration: 0,
+          id: id, subject: info.subject, course: info.course, title: info.title, name: f.name, no: 0, size: f.size, duration: 0,
           playCount: 0, lastPlayedAt: 0, listenedSec: 0, lectureSec: 0, lapLec: 0,
           status: 'none', lastPos: 0, addedAt: Date.now()
         };
         tracks.push(t);
         await idbPut('tracks', t);
+        lastGroup = groupOf(t);
+        touched[lastGroup] = 1;
         added++;
       } catch (e) {
         console.error(e);
@@ -196,12 +242,15 @@
         break;
       }
     }
-    var list = renumber(subject);
-    await idbReq('tracks', 'readwrite', function (s) { list.forEach(function (t) { s.put(t); }); return null; });
+    var list = [];
+    Object.keys(touched).forEach(function (g) { list = list.concat(renumber(g)); });
+    if (list.length) await idbReq('tracks', 'readwrite', function (s) { list.forEach(function (t) { s.put(t); }); return null; });
     sortTracks();
-    ui.subject = subject; lsSet(K.ui, ui);
+    var gs = Object.keys(touched);
+    if (gs.length === 1) { ui.subject = 'g:' + gs[0]; lsSet(K.ui, ui); }
     renderAll();
-    toast(added + ' 件取り込みました' + (skipped ? '（同じ名前の ' + skipped + ' 件は飛ばしました）' : ''), 4000);
+    toast(added + ' 件取り込みました' + (gs.length ? '（' + gs.join('・') + '）' : '') +
+      (skipped ? '　同じ名前の ' + skipped + ' 件は飛ばしました' : ''), 5000);
   }
 
   async function deleteTracks(list) {
@@ -216,7 +265,7 @@
     list.forEach(function (t) { gone[t.id] = 1; });
     tracks = tracks.filter(function (t) { return !gone[t.id]; });
     var subs = {};
-    list.forEach(function (t) { subs[t.subject] = 1; });
+    list.forEach(function (t) { subs[groupOf(t)] = 1; });
     var all = [];
     Object.keys(subs).forEach(function (s) { all = all.concat(renumber(s)); });
     if (all.length) await idbReq('tracks', 'readwrite', function (s) { all.forEach(function (t) { s.put(t); }); return null; });
@@ -323,9 +372,10 @@
   function seekBy(delta) { if (cur) seekTo(audio.currentTime + delta); }
 
   function orderedForNext() {
-    // 同じ科目の番号順
+    // 同じ科目・同じコースの番号順
     if (!cur) return [];
-    return tracks.filter(function (t) { return t.subject === cur.subject; });
+    var g = groupOf(cur);
+    return tracks.filter(function (t) { return groupOf(t) === g; });
   }
   function nextTrack(auto) {
     var list = orderedForNext();
@@ -335,9 +385,9 @@
       var n = list[i + 1];
       loadTrack(n.id, auto ? 0 : (n.lastPos || 0), true);
     } else if (auto) {
-      toast('この科目の最後まで聞きました 🎉', 4000);
+      toast('「' + groupOf(cur) + '」の最後まで聞きました 🎉', 4000);
       setPlaybackState('paused');
-    } else toast('この科目の最後の音声です');
+    } else toast('このコースの最後の音声です');
   }
   function prevTrack() {
     if (cur && audio.currentTime > 5) { seekTo(0); return; }
@@ -403,6 +453,8 @@
       id: uid(),
       timestamp: new Date().toISOString(),
       subject: t.subject,
+      course: t.course || '',
+      title: titleOf(t),
       no: t.no,
       fileName: t.name,
       listenedSeconds: Math.round(real || 0),
@@ -505,8 +557,8 @@
     try {
       if (window.MediaMetadata) {
         navigator.mediaSession.metadata = new MediaMetadata({
-          title: cur.no + '. ' + cur.name.replace(/\.[^.]+$/, ''),
-          artist: cur.subject,
+          title: titleOf(cur),
+          artist: groupOf(cur),
           album: '学習音声プレーヤー',
           artwork: [
             { src: 'icons/icon-192.png', sizes: '192x192', type: 'image/png' },
@@ -622,13 +674,13 @@
     if (t) {
       var playing = cur && curUrl && !audio.paused;
       $('heroLabel').textContent = playing ? '♪ 再生中（タップで一時停止）' : '▶ 前回の続きから即再開';
-      $('heroTitle').textContent = t.no + '. ' + t.name.replace(/\.[^.]+$/, '');
-      $('heroSub').textContent = t.subject + '　停止位置 ' + fmtTime(pos) + (t.duration ? ' / ' + fmtTime(t.duration) : '') +
+      $('heroTitle').textContent = titleOf(t);
+      $('heroSub').textContent = groupOf(t) + '　停止位置 ' + fmtTime(pos) + (t.duration ? ' / ' + fmtTime(t.duration) : '') +
         '　' + ((t.playCount || 0) + 1) + ' 周目';
     } else if (tracks.length) {
       $('heroLabel').textContent = '▶ はじめから再生';
-      $('heroTitle').textContent = tracks[0].no + '. ' + tracks[0].name.replace(/\.[^.]+$/, '');
-      $('heroSub').textContent = tracks[0].subject;
+      $('heroTitle').textContent = titleOf(tracks[0]);
+      $('heroSub').textContent = groupOf(tracks[0]);
     } else {
       $('heroLabel').textContent = '▶ 前回の続きから即再開';
       $('heroTitle').textContent = 'まだ音声がありません';
@@ -657,8 +709,8 @@
     var card = $('nowCard');
     if (!cur) { card.classList.add('hidden'); return; }
     card.classList.remove('hidden');
-    $('nowSubject').textContent = cur.subject + '　No.' + cur.no;
-    $('nowTitle').textContent = cur.name;
+    $('nowSubject').textContent = groupOf(cur) + '　No.' + cur.no;
+    $('nowTitle').textContent = titleOf(cur);
     $('nowLap').textContent = cur.playCount || 0;
     $('nowTotal').innerHTML = '累計 ' + fmtMin(cur.listenedSec) + '<br>講義 ' + fmtMin(cur.lectureSec);
     var html = '';
@@ -672,46 +724,58 @@
 
   function visibleTracks() {
     var list = tracks.filter(function (t) {
-      if (ui.subject && t.subject !== ui.subject) return false;
+      if (!matchFilter(t, ui.subject)) return false;
       if (ui.view === 'unheard') return !(t.playCount > 0) && !(t.listenedSec > 0);
       if (ui.view === 'review') return t.status === 'again' || t.status === 'text';
       return true;
     });
     if (ui.sort === 'count') {
-      list.sort(function (a, b) { return (a.playCount || 0) - (b.playCount || 0) || natcmp(a.subject, b.subject) || a.no - b.no; });
+      list.sort(function (a, b) { return (a.playCount || 0) - (b.playCount || 0) || natcmp(groupOf(a), groupOf(b)) || a.no - b.no; });
     } else if (ui.sort === 'old') {
-      list.sort(function (a, b) { return (a.lastPlayedAt || 0) - (b.lastPlayedAt || 0) || natcmp(a.subject, b.subject) || a.no - b.no; });
+      list.sort(function (a, b) { return (a.lastPlayedAt || 0) - (b.lastPlayedAt || 0) || natcmp(groupOf(a), groupOf(b)) || a.no - b.no; });
     }
     return list;
   }
 
   function renderFilters() {
     var subs = subjects();
-    if (ui.subject && subs.indexOf(ui.subject) < 0) ui.subject = '';
+    var vals = [''];
     var opt = '<option value="">すべての科目</option>';
-    subs.forEach(function (s) { opt += '<option value="' + esc(s) + '"' + (s === ui.subject ? ' selected' : '') + '>' + esc(s) + '</option>'; });
+    subs.forEach(function (s) {
+      var cs = coursesOf(s);
+      var multi = cs.length > 1;
+      if (multi) { vals.push('s:' + s); opt += '<option value="s:' + esc(s) + '">' + esc(s) + '（すべてのコース）</option>'; }
+      cs.forEach(function (c) {
+        var g = s + (c ? '＜' + c + '＞' : '');
+        vals.push('g:' + g);
+        opt += '<option value="g:' + esc(g) + '">' + (multi ? '　' : '') + esc(g) + '</option>';
+      });
+    });
+    if (ui.subject && ui.subject.indexOf('s:') !== 0 && ui.subject.indexOf('g:') !== 0) ui.subject = 'g:' + ui.subject;
+    if (vals.indexOf(ui.subject) < 0) ui.subject = '';
     $('fSubject').innerHTML = opt;
+    $('fSubject').value = ui.subject;
     $('fView').value = ui.view;
     $('fSort').value = ui.sort;
     var dl = '';
     subs.forEach(function (s) { dl += '<option value="' + esc(s) + '">'; });
     $('subjectList').innerHTML = dl;
-    if (!$('importSubject').value) $('importSubject').value = settings.subject || ui.subject || '';
+    if (!$('importSubject').value) $('importSubject').value = settings.subject || '';
     var del = '';
-    subs.forEach(function (s) { del += '<option value="' + esc(s) + '">' + esc(s) + '</option>'; });
+    groups().forEach(function (g) { del += '<option value="' + esc(g) + '">' + esc(g) + '</option>'; });
     $('delSubject').innerHTML = del || '<option value="">（なし）</option>';
   }
 
   function renderList() {
     var list = visibleTracks();
-    var showSub = !ui.subject && subjects().length > 1;
+    var showSub = !(ui.subject && ui.subject.indexOf('g:') === 0) && groups().length > 1;
     var html = '';
     list.forEach(function (t) {
       var prog = t.duration ? Math.min(100, Math.round((t.lastPos || 0) / t.duration * 100)) : 0;
       var mk = statusMark(t.status);
       html += '<li class="track' + (cur && cur.id === t.id ? ' cur' : '') + '" data-id="' + t.id + '">' +
         '<div class="track-no ' + lapClass(t.playCount) + '">' + t.no + '</div>' +
-        '<div class="track-body"><div class="track-name">' + (showSub ? '<span class="hint">' + esc(t.subject) + '｜</span>' : '') + esc(t.name.replace(/\.[^.]+$/, '')) + '</div>' +
+        '<div class="track-body"><div class="track-name">' + (showSub ? '<span class="hint">' + esc(groupOf(t)) + '｜</span>' : '') + esc(titleOf(t)) + '</div>' +
         '<div class="track-meta">周回 ' + (t.playCount || 0) + '　最終 ' + fmtDate(t.lastPlayedAt) + '　累計 ' + fmtMin(t.listenedSec) +
         (t.duration ? '　長さ ' + fmtTime(t.duration) : '') + '</div>' +
         '<div class="track-prog"><div style="width:' + prog + '%"></div></div></div>' +
@@ -745,16 +809,19 @@
 
   function renderTiles() {
     if (ui.tab !== 'tiles') return;
-    var subs = ui.subject ? [ui.subject] : subjects();
+    var gs = groups().filter(function (g) {
+      for (var i = 0; i < tracks.length; i++) if (groupOf(tracks[i]) === g) return matchFilter(tracks[i], ui.subject);
+      return false;
+    });
     var html = '';
-    subs.forEach(function (s) {
-      var list = tracks.filter(function (t) { return t.subject === s; });
+    gs.forEach(function (s) {
+      var list = tracks.filter(function (t) { return groupOf(t) === s; });
       var done = list.filter(function (t) { return t.playCount > 0; }).length;
       var sum = 0;
       list.forEach(function (t) { sum += t.playCount || 0; });
       html += '<div class="tile-sub">' + esc(s) + '　' + done + ' / ' + list.length + ' 単元を 1 周以上（のべ ' + sum + ' 周）</div><div class="tile-grid">';
       list.forEach(function (t) {
-        html += '<button type="button" class="tile ' + lapClass(t.playCount) + (cur && cur.id === t.id ? ' cur' : '') + '" data-id="' + t.id + '" title="' + esc(t.name) + '">' +
+        html += '<button type="button" class="tile ' + lapClass(t.playCount) + (cur && cur.id === t.id ? ' cur' : '') + '" data-id="' + t.id + '" title="' + esc(titleOf(t)) + '">' +
           t.no + (statusMark(t.status) ? '<span class="tm">' + statusMark(t.status) + '</span>' : '') + '</button>';
       });
       html += '</div>';
@@ -824,7 +891,7 @@
   }
   var seekDragging = false;
   function renderPlayer() {
-    $('pTitle').textContent = cur ? (cur.subject + '｜' + cur.no + '. ' + cur.name.replace(/\.[^.]+$/, '')) : '—';
+    $('pTitle').textContent = cur ? (groupOf(cur) + '｜' + titleOf(cur)) : '—';
     $('bPlay').textContent = (cur && curUrl && !audio.paused) ? '❚❚' : '▶';
     renderPlayerTime();
   }
@@ -872,9 +939,9 @@
     return /[",\n\r]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v;
   }
   function tracksCsv() {
-    var rows = [['科目', '番号', 'ファイル名', '周回数', '累積実時間(分)', '累積講義時間(分)', '最終聴取日', '理解度', '停止位置', '長さ']];
+    var rows = [['科目', 'コース', '番号', '題名', 'ファイル名', '周回数', '累積実時間(分)', '累積講義時間(分)', '最終聴取日', '理解度', '停止位置', '長さ']];
     tracks.forEach(function (t) {
-      rows.push([t.subject, t.no, t.name, t.playCount || 0, ((t.listenedSec || 0) / 60).toFixed(1), ((t.lectureSec || 0) / 60).toFixed(1),
+      rows.push([t.subject, t.course || '', t.no, titleOf(t), t.name, t.playCount || 0, ((t.listenedSec || 0) / 60).toFixed(1), ((t.lectureSec || 0) / 60).toFixed(1),
         t.lastPlayedAt ? new Date(t.lastPlayedAt).toLocaleString() : '', statusLabel(t.status), fmtTime(t.lastPos), fmtTime(t.duration)]);
     });
     return rows.map(function (r) { return r.map(csvCell).join(','); }).join('\r\n');
@@ -917,7 +984,7 @@
       app: 'studyAudioPlayer', version: APP_VERSION, savedAt: new Date().toISOString(),
       settings: settings, daily: daily, queue: queue,
       tracks: tracks.map(function (t) {
-        return { subject: t.subject, name: t.name, playCount: t.playCount, lastPlayedAt: t.lastPlayedAt, listenedSec: t.listenedSec,
+        return { subject: t.subject, course: t.course || '', name: t.name, playCount: t.playCount, lastPlayedAt: t.lastPlayedAt, listenedSec: t.listenedSec,
           lectureSec: t.lectureSec, lapLec: t.lapLec, status: t.status, lastPos: t.lastPos };
       })
     };
@@ -932,8 +999,9 @@
     var hit = 0, miss = 0;
     (data.tracks || []).forEach(function (b) {
       var t = null;
-      for (var i = 0; i < tracks.length; i++) if (tracks[i].subject === b.subject && tracks[i].name === b.name) { t = tracks[i]; break; }
+      for (var i = 0; i < tracks.length; i++) if (tracks[i].name === b.name) { t = tracks[i]; break; }
       if (!t) { miss++; return; }
+      if (b.subject && t.subject !== b.subject && !parseName(t.name)) { t.subject = b.subject; }
       ['playCount', 'lastPlayedAt', 'listenedSec', 'lectureSec', 'lapLec', 'status', 'lastPos'].forEach(function (f) { if (b[f] !== undefined) t[f] = b[f]; });
       markDirty(t); hit++;
     });
@@ -1021,7 +1089,6 @@
     $('fileInput').addEventListener('change', function () {
       var files = this.files;
       var subject = $('importSubject').value;
-      if (!subject.trim()) { toast('先に科目名を入れてください'); this.value = ''; return; }
       importFiles(files, subject).then(function () { $('fileInput').value = ''; });
     });
 
@@ -1056,7 +1123,7 @@
     $('btnDelSubject').addEventListener('click', function () {
       var s = $('delSubject').value;
       if (!s) return;
-      var list = tracks.filter(function (t) { return t.subject === s; });
+      var list = tracks.filter(function (t) { return groupOf(t) === s; });
       if (!confirm('「' + s + '」の音声 ' + list.length + ' 件と、その周回などの記録を消します。元に戻せません。よろしいですか？')) return;
       deleteTracks(list).then(function () { renderStorage(); toast('消しました'); });
     });
@@ -1114,6 +1181,24 @@
     renderHero(); renderStats(); renderSync();
   }
 
+  async function migrateNames() {
+    var changed = [], gs = {};
+    tracks.forEach(function (t) {
+      if (t.course !== undefined && t.title !== undefined) return;
+      var p = parseName(t.name);
+      if (p) { t.subject = p.subject; t.course = p.course; t.title = p.title; }
+      else { t.course = t.course || ''; t.title = t.name.replace(/\.[^.]+$/, ''); }
+      changed.push(t);
+    });
+    // 番号の付け方が変わったときのため、開くたびに付け直す（変わったものだけ保存）
+    var oldNo = {};
+    tracks.forEach(function (t) { oldNo[t.id] = t.no; gs[groupOf(t)] = 1; });
+    Object.keys(gs).forEach(function (g) { renumber(g); });
+    tracks.forEach(function (t) { if (oldNo[t.id] !== t.no && changed.indexOf(t) < 0) changed.push(t); });
+    if (!changed.length) return;
+    await idbReq('tracks', 'readwrite', function (s) { changed.forEach(function (t) { s.put(t); }); return null; });
+  }
+
   /* ---------- 起動 ---------- */
   async function start() {
     bind();
@@ -1121,6 +1206,7 @@
     try {
       db = await openDB();
       tracks = await idbAll('tracks');
+      await migrateNames();
       sortTracks();
     } catch (e) {
       console.error(e);
