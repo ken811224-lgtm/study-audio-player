@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f1720">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="学習音声">
+<title>学習音声プレーヤー</title>
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">🎧 学習音声</div>
+  <button id="syncBadge" class="sync-badge" type="button" title="送信の状態">同期 —</button>
+  <button id="btnSettings" class="icon-btn" type="button" aria-label="設定">⚙</button>
+</header>
+
+<main id="main">
+  <!-- 前回の続きから -->
+  <section id="hero" class="hero" role="button" tabindex="0">
+    <div class="hero-label" id="heroLabel">▶ 前回の続きから即再開</div>
+    <div class="hero-title" id="heroTitle">まだ音声がありません</div>
+    <div class="hero-sub" id="heroSub">下の「一覧」から MP3 を取り込んでください</div>
+    <div class="hero-stats">
+      <div class="stat"><div class="stat-num" id="heroToday">0分</div><div class="stat-cap">今日（実時間）</div></div>
+      <div class="stat"><div class="stat-num" id="heroLecture">0分</div><div class="stat-cap">講義時間（1倍速）</div></div>
+      <div class="stat"><div class="stat-num" id="heroStreak">🔥0</div><div class="stat-cap">連続達成日数</div></div>
+    </div>
+    <div class="gauge"><div class="gauge-bar" id="goalBar"></div></div>
+    <div class="gauge-cap" id="goalCap">今日の目標 15分</div>
+  </section>
+
+  <!-- いま再生中 -->
+  <section id="nowCard" class="card hidden">
+    <div class="now-head">
+      <div>
+        <div class="now-subject" id="nowSubject"></div>
+        <div class="now-title" id="nowTitle"></div>
+      </div>
+    </div>
+    <div class="now-row">
+      <span class="lbl">周回</span>
+      <button class="mini" id="lapMinus" type="button">−1</button>
+      <span class="lap-num" id="nowLap">0</span>
+      <button class="mini" id="lapPlus" type="button">＋1</button>
+      <span class="now-total" id="nowTotal"></span>
+    </div>
+    <div class="status-row" id="statusRow"></div>
+    <div class="now-foot">
+      <span id="nowLapHint" class="hint"></span>
+      <button class="link-btn danger" id="btnDeleteTrack" type="button">この音声を削除</button>
+    </div>
+  </section>
+
+  <!-- タブ -->
+  <nav class="tabs">
+    <button class="tab active" data-tab="list" type="button">一覧</button>
+    <button class="tab" data-tab="tiles" type="button">周回マップ</button>
+    <button class="tab" data-tab="stats" type="button">継続記録</button>
+  </nav>
+
+  <section id="tab-list" class="tabpane">
+    <div class="import-box">
+      <input id="importSubject" class="input" list="subjectList" placeholder="科目名（例：民法）" autocomplete="off">
+      <datalist id="subjectList"></datalist>
+      <label class="btn primary file-btn">＋ MP3を取り込む
+        <input id="fileInput" type="file" accept="audio/*,.mp3,.m4a" multiple>
+      </label>
+    </div>
+    <div class="filters">
+      <select id="fSubject" class="select"></select>
+      <select id="fView" class="select">
+        <option value="all">すべて</option>
+        <option value="unheard">未聴取</option>
+        <option value="review">復習マーク（△・×）</option>
+      </select>
+      <select id="fSort" class="select">
+        <option value="no">番号順</option>
+        <option value="count">再生回数が少ない順</option>
+        <option value="old">ご無沙汰順</option>
+      </select>
+    </div>
+    <div class="list-cap" id="listCap"></div>
+    <ul id="trackList" class="track-list"></ul>
+  </section>
+
+  <section id="tab-tiles" class="tabpane hidden">
+    <div class="legend">
+      <span><i class="tc0"></i>0回</span><span><i class="tc1"></i>1回</span><span><i class="tc2"></i>2回</span><span><i class="tc3"></i>3回以上</span>
+    </div>
+    <div id="tileWrap"></div>
+  </section>
+
+  <section id="tab-stats" class="tabpane hidden">
+    <h3 class="sec-title">日別の聴取（直近90日）</h3>
+    <div class="heat-wrap"><div id="dayHeat" class="day-heat"></div></div>
+    <div class="legend">
+      <span><i class="hc0"></i>0分</span><span><i class="hc1"></i>1〜14分</span><span><i class="hc2"></i>15〜29分</span><span><i class="hc3"></i>30分以上</span>
+    </div>
+    <div class="day-info" id="dayInfo">マスをタップするとその日の時間が出ます</div>
+    <div class="sum-grid" id="sumGrid"></div>
+  </section>
+</main>
+
+<!-- 下の操作バー -->
+<footer class="player">
+  <div class="p-title" id="pTitle">—</div>
+  <div class="p-seek">
+    <span id="tCur" class="t">0:00</span>
+    <input id="seek" type="range" min="0" max="1000" value="0" step="1">
+    <span id="tDur" class="t">0:00</span>
+  </div>
+  <div class="p-ctrl">
+    <button class="cbtn" id="bPrev" type="button" aria-label="前の音声">⏮</button>
+    <button class="cbtn" id="bBack" type="button" aria-label="10秒戻す">↺10</button>
+    <button class="cbtn play" id="bPlay" type="button" aria-label="再生">▶</button>
+    <button class="cbtn" id="bFwd" type="button" aria-label="15秒進める">15↻</button>
+    <button class="cbtn" id="bNext" type="button" aria-label="次の音声">⏭</button>
+  </div>
+  <div class="p-rates" id="rates"></div>
+</footer>
+
+<!-- 設定 -->
+<div id="settings" class="modal hidden">
+  <div class="modal-body">
+    <div class="modal-head">
+      <h2>設定</h2>
+      <button class="icon-btn" id="btnCloseSettings" type="button" aria-label="閉じる">✕</button>
+    </div>
+
+    <h3 class="sec-title">ふだんの設定</h3>
+    <label class="field">今日の目標（分）
+      <input id="sGoal" class="input" type="number" min="1" max="600" inputmode="numeric">
+    </label>
+    <label class="field">取り込むときの科目名（決まった科目があれば）
+      <input id="sSubject" class="input" placeholder="例：不動産登記法">
+    </label>
+    <label class="check"><input id="sAutoNext" type="checkbox"> 終わったら次の音声を続けて再生</label>
+    <label class="field">ヘッドセット・ロック画面の「前/次」ボタン
+      <select id="sTrackBtn" class="select">
+        <option value="track">前の音声／次の音声</option>
+        <option value="seek">10秒戻す／15秒進める</option>
+      </select>
+    </label>
+
+    <h3 class="sec-title">スプレッドシートへ送る（GAS）</h3>
+    <label class="field">GAS ウェブアプリの URL
+      <input id="sGasUrl" class="input" placeholder="https://script.google.com/macros/s/…/exec" autocomplete="off">
+    </label>
+    <label class="field">合言葉（GAS 側の SECRET と同じもの。空でも可）
+      <input id="sSecret" class="input" autocomplete="off">
+    </label>
+    <div class="btn-row">
+      <button class="btn primary" id="btnSaveSettings" type="button">保存する</button>
+      <button class="btn" id="btnSendNow" type="button">今すぐ送る</button>
+    </div>
+    <div class="hint" id="syncInfo"></div>
+
+    <h3 class="sec-title">バックアップ</h3>
+    <div class="btn-row">
+      <button class="btn" id="btnCsvTracks" type="button">単元の記録 CSV を保存</button>
+      <button class="btn" id="btnCopyTracks" type="button">単元の記録をコピー</button>
+      <button class="btn" id="btnCsvDaily" type="button">日別の記録 CSV を保存</button>
+      <button class="btn" id="btnCopyDaily" type="button">日別の記録をコピー</button>
+    </div>
+    <div class="btn-row">
+      <button class="btn" id="btnBackup" type="button">履歴を丸ごと保存（JSON）</button>
+      <label class="btn file-btn">履歴を読み込む
+        <input id="restoreInput" type="file" accept=".json,application/json">
+      </label>
+    </div>
+    <div class="hint">機種変更のときは「丸ごと保存」→新しいスマホで MP3 を取り込み→「読み込む」で周回数などが戻ります（音声そのものは入りません）。</div>
+
+    <h3 class="sec-title">保存した音声</h3>
+    <div class="hint" id="storageInfo"></div>
+    <div class="btn-row">
+      <select id="delSubject" class="select"></select>
+      <button class="btn danger" id="btnDelSubject" type="button">この科目の音声を消す</button>
+    </div>
+    <div class="btn-row">
+      <button class="btn danger" id="btnDelAll" type="button">音声と記録をすべて消す</button>
+    </div>
+    <div class="hint" id="verInfo"></div>
+  </div>
+</div>
+
+<div id="toast" class="toast hidden"></div>
+
+<audio id="audio" preload="auto" playsinline webkit-playsinline></audio>
+<script src="app.js"></script>
+</body>
+</html>
