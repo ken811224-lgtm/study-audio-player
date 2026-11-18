@@ -5,7 +5,7 @@
 (function () {
   'use strict';
 
-  var APP_VERSION = '1.2.0';
+  var APP_VERSION = '1.2.1';
   var RATES = [1.0, 1.3, 1.5, 1.8, 2.0, 2.2];
   var STATUS_LIST = [
     { key: 'none', label: '未評価', mark: '' },
@@ -1288,7 +1288,6 @@
     $('sAutoNext').checked = !!settings.autoNext;
     $('sTrackBtn').value = settings.trackBtn;
     $('sGasUrl').value = settings.gasUrl || '';
-    $('sSecret').value = settings.secret || '';
     $('sDeviceName').value = settings.deviceName || '';
     renderSync(); renderStorage();
     $('settings').classList.remove('hidden');
@@ -1300,7 +1299,6 @@
     settings.autoNext = $('sAutoNext').checked;
     settings.trackBtn = $('sTrackBtn').value;
     settings.gasUrl = $('sGasUrl').value.trim();
-    settings.secret = $('sSecret').value.trim();
     settings.deviceName = $('sDeviceName').value.trim();
     lsSet(K.settings, settings);
     renderHero(); renderStats(); renderSync();

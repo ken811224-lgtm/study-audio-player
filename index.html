@@ -151,15 +151,12 @@
     </label>
 
     <h3 class="sec-title">端末どうしの同期・スプレッドシート（GAS）</h3>
-    <div class="hint" style="margin-bottom:8px">使う端末すべてに同じ URL と合言葉を入れると、周回数・聴取時間・理解度・続きの位置がそろいます（音声そのものは端末ごとに取り込む）。</div>
+    <div class="hint" style="margin-bottom:8px">使う端末すべてに同じ URL を入れると、周回数・聴取時間・理解度・続きの位置がそろいます（音声そのものは端末ごとに取り込む）。</div>
     <label class="field">この端末の名前（スプレッドシートでどの端末か分かるように）
       <input id="sDeviceName" class="input" placeholder="例：iPhone、タブレット" autocomplete="off">
     </label>
     <label class="field">GAS ウェブアプリの URL
       <input id="sGasUrl" class="input" placeholder="https://script.google.com/macros/s/…/exec" autocomplete="off">
-    </label>
-    <label class="field">合言葉（GAS 側の SECRET と同じもの。空でも可）
-      <input id="sSecret" class="input" autocomplete="off">
     </label>
     <div class="btn-row">
       <button class="btn primary" id="btnSaveSettings" type="button">保存する</button>
