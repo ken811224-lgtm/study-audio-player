@@ -3,6 +3,14 @@
 講義の MP3 をスキマ時間に聞いて、**周回数・聴取時間・理解度をきっちり記録する**学習専用のプレーヤーです。
 スマホの「ホーム画面に追加」で使います。一度取り込めば機内モードでも動きます。
 
+**スマホで開く URL：https://ken811224-lgtm.github.io/study-audio-player/**
+（GitHub Pages で公開。リポジトリ https://github.com/ken811224-lgtm/study-audio-player ）
+
+### 直したあとに公開しなおす
+1. `app.js` の `APP_VERSION`、`sw.js` の `CACHE`（例 `sap-v1.0.1`）、CHANGELOG を上げる
+2. このフォルダで `git add -A` → `git commit -m "v1.0.1"` → `git push`
+3. 1〜2 分で反映。スマホはアプリを 2 回開き直すと新しい版に入れかわる（記録と音声はそのまま）
+
 ## できること
 
 | 場所 | 中身 |
