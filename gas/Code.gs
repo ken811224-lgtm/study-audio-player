@@ -67,6 +67,18 @@ function doPost(e) {
   }
 }
 
+// 最初に 1 回だけ Apps Script の画面で実行する：使う許可を出して、シートを作っておく
+function setup() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  sheet_(ss, LOG_SHEET, LOG_HEAD);
+  sheet_(ss, MASTER_SHEET, MASTER_HEAD);
+  sheet_(ss, DAILY_SHEET, DAILY_HEAD);
+  sheet_(ss, SYNC_T_SHEET, SYNC_T_HEAD);
+  sheet_(ss, SYNC_D_SHEET, SYNC_D_HEAD);
+  var first = ss.getSheetByName('シート1');
+  if (first && first.getLastRow() === 0 && ss.getSheets().length > 1) ss.deleteSheet(first);
+}
+
 // ブラウザで URL を開いたときの確認用
 function doGet() {
   return json_({ ok: true, message: '学習音声プレーヤーの受け口は動いています（v1.2.0）' });
