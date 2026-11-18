@@ -1,14 +1,20 @@
 /**
- * 学習音声プレーヤー ⇔ Google スプレッドシート 同期用 GAS
+ * 学習音声プレーヤー ⇔ Google スプレッドシート 同期用 GAS（v1.2.0）
  *
  * 使い方：記録用のスプレッドシートを開き「拡張機能 → Apps Script」にこのコードを貼る
  *         → 「デプロイ → 新しいデプロイ → ウェブアプリ」（実行するユーザー：自分／アクセス：全員）
- *         → 出てきた URL（…/exec）をアプリの設定に入れる
+ *         → 出てきた URL（…/exec）を、使う端末すべてのアプリの設定に入れる
+ *
+ * 同期のしくみ
+ *   各端末は「自分の端末で聞いた分」だけを送る（同期_単元・同期_日別 に端末ごとの行で上書き）。
+ *   アプリは全端末の行を読み戻して足し合わせる。周回数・聴取時間は端末の合計、
+ *   理解度と停止位置はいちばん新しく変えた端末のもの。
  *
  * シート（無ければ自動で作る）
- *   再生ログ   … アプリから届いた 1 件ずつの記録を下へ足していく
- *   単元マスタ … 科目＋ファイル名ごとに最新の周回数・累積時間・最終聴取日・理解度へ上書き
- *   日別       … 日ごとの実聴取時間・講義時間（アプリの数字で上書き）
+ *   再生ログ   … 一時停止・周回 +1 などのたびに 1 行（読むため用）
+ *   単元マスタ … 全端末を合わせた 周回数・累積時間・最終聴取日・理解度（毎回作り直す）
+ *   日別       … 全端末を合わせた 日ごとの聴取時間（毎回作り直す）
+ *   同期_単元・同期_日別 … 同期の元データ（手で直さない）
  */
 
 // 合言葉。空のままなら誰でも送れる（URL を知っている人だけ）。入れたらアプリの設定にも同じものを入れる
@@ -17,25 +23,43 @@ var SECRET = '';
 var LOG_SHEET = '再生ログ';
 var MASTER_SHEET = '単元マスタ';
 var DAILY_SHEET = '日別';
-var LOG_HEAD = ['ログID', '日時', '科目', 'コース', '番号', '題名', 'ファイル名', 'できごと', '聴取(秒)', '講義時間(秒)', '周回数', '理解度', '受信日時'];
-var MASTER_HEAD = ['科目', 'コース', '番号', '題名', 'ファイル名', '周回数', '累積実時間(分)', '累積講義時間(分)', '最終聴取日', '理解度', '更新日時'];
+var SYNC_T_SHEET = '同期_単元';
+var SYNC_D_SHEET = '同期_日別';
+var LOG_HEAD = ['ログID', '日時', '端末', '科目', 'コース', '番号', '題名', 'ファイル名', 'できごと', '聴取(秒)', '講義時間(秒)', '周回数', '理解度', '受信日時'];
+var MASTER_HEAD = ['科目', 'コース', '番号', '題名', 'ファイル名', '周回数', '累積実時間(分)', '累積講義時間(分)', '最終聴取日', '理解度', '聞いた端末', '更新日時'];
 var DAILY_HEAD = ['日付', '実聴取(分)', '講義時間(分)', '更新日時'];
+// 同期_単元 の列（時刻はミリ秒の数字のまま）
+var SYNC_T_HEAD = ['端末ID', '端末名', 'ファイル名', '科目', 'コース', '番号', '題名', '周回', '実聴取秒', '講義秒', '最終聴取', '理解度', '理解度の時刻', '停止位置', '停止位置の時刻', '更新日時'];
+var SYNC_D_HEAD = ['端末ID', '端末名', '日付', '実秒', '講義秒', '更新日時'];
 var EVENT_NAME = {
   pause: '一時停止', ended: '最後まで', complete: '周回 +1', 'switch': '曲を変えた', stop: '停止',
   listening: '聴取中', close: '閉じた', status: '理解度を変えた', 'manual+1': '手で +1', 'manual-1': '手で -1'
 };
+var STATUS_LABEL = { none: '未評価', good: '◎ 完璧', again: '△ もう一度', text: '× 要テキスト確認' };
 
 function doPost(e) {
   var lock = LockService.getScriptLock();
   try {
-    lock.waitLock(20000);
+    lock.waitLock(25000);
     var body = JSON.parse((e && e.postData && e.postData.contents) || '{}');
     if (SECRET && body.secret !== SECRET) return json_({ ok: false, error: '合言葉が違います' });
     var ss = SpreadsheetApp.getActiveSpreadsheet();
-    var added = appendLogs_(ss, body.logs || []);
-    updateMaster_(ss, body.logs || []);
-    updateDaily_(ss, body.daily || {});
-    return json_({ ok: true, added: added });
+    var added = appendLogs_(ss, body.logs || [], body.deviceName || '');
+    var out = { ok: true, added: added };
+    if (body.device) {
+      var st = upsertSyncTracks_(ss, body.device, body.deviceName || '', body.tracks || []);
+      var sd = upsertSyncDaily_(ss, body.device, body.deviceName || '', body.daily || []);
+      if (st.changed) rebuildMaster_(ss, st.rows);
+      if (sd.changed) rebuildDaily_(ss, sd.rows);
+      if (body.pull) {
+        out.tracks = st.rows.map(function (r) {
+          return { d: r[0], dn: r[1], f: r[2], pc: num_(r[7]), ls: num_(r[8]), lc: num_(r[9]), lp: num_(r[10]),
+            st: r[11] || 'none', sa: num_(r[12]), pos: num_(r[13]), pa: num_(r[14]) };
+        });
+        out.daily = sd.rows.map(function (r) { return { d: r[0], k: String(r[2]), r: num_(r[3]), l: num_(r[4]) }; });
+      }
+    }
+    return json_(out);
   } catch (err) {
     return json_({ ok: false, error: String(err && err.message || err) });
   } finally {
@@ -45,12 +69,13 @@ function doPost(e) {
 
 // ブラウザで URL を開いたときの確認用
 function doGet() {
-  return json_({ ok: true, message: '学習音声プレーヤーの受け口は動いています' });
+  return json_({ ok: true, message: '学習音声プレーヤーの受け口は動いています（v1.2.0）' });
 }
 
 function json_(obj) {
   return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
 }
+function num_(v) { var n = Number(v); return isFinite(n) ? n : 0; }
 
 function sheet_(ss, name, head) {
   var sh = ss.getSheetByName(name);
@@ -61,6 +86,16 @@ function sheet_(ss, name, head) {
   }
   return sh;
 }
+function readRows_(sh, width) {
+  var last = sh.getLastRow();
+  return last > 1 ? sh.getRange(2, 1, last - 1, width).getValues() : [];
+}
+// 見出しの下を全部書きかえる（行が減ったときは残りを消す）
+function writeRows_(sh, rows, width) {
+  var last = sh.getLastRow();
+  if (last > rows.length + 1) sh.getRange(rows.length + 2, 1, last - rows.length - 1, width).clearContent();
+  if (rows.length) sh.getRange(2, 1, rows.length, width).setValues(rows);
+}
 
 function toDate_(s) {
   if (!s) return '';
@@ -68,7 +103,7 @@ function toDate_(s) {
   return isNaN(d.getTime()) ? '' : d;
 }
 
-function appendLogs_(ss, logs) {
+function appendLogs_(ss, logs, deviceName) {
   if (!logs.length) return 0;
   var sh = sheet_(ss, LOG_SHEET, LOG_HEAD);
   var last = sh.getLastRow();
@@ -84,75 +119,95 @@ function appendLogs_(ss, logs) {
     if (!l || !l.id || seen[l.id]) return;
     seen[l.id] = true;
     rows.push([
-      l.id, toDate_(l.timestamp), l.subject || '', l.course || '', l.no || '', l.title || '', l.fileName || '',
-      EVENT_NAME[l.event] || l.event || '', Number(l.listenedSeconds) || 0, Number(l.lectureSeconds) || 0,
-      Number(l.playCount) || 0, l.status || '', now
+      l.id, toDate_(l.timestamp), deviceName, l.subject || '', l.course || '', l.no || '', l.title || '', l.fileName || '',
+      EVENT_NAME[l.event] || l.event || '', num_(l.listenedSeconds), num_(l.lectureSeconds),
+      num_(l.playCount), l.status || '', now
     ]);
   });
   if (rows.length) sh.getRange(last + 1, 1, rows.length, LOG_HEAD.length).setValues(rows);
   return rows.length;
 }
 
-function updateMaster_(ss, logs) {
-  if (!logs.length) return;
-  var sh = sheet_(ss, MASTER_SHEET, MASTER_HEAD);
-  var last = sh.getLastRow();
-  var data = last > 1 ? sh.getRange(2, 1, last - 1, MASTER_HEAD.length).getValues() : [];
+// 端末の行を上書き（端末ID＋ファイル名で 1 行）
+function upsertSyncTracks_(ss, device, deviceName, list) {
+  var sh = sheet_(ss, SYNC_T_SHEET, SYNC_T_HEAD);
+  var rows = readRows_(sh, SYNC_T_HEAD.length);
+  if (!list.length) return { rows: rows, changed: false };
   var index = {};
-  data.forEach(function (r, i) { index[r[4]] = i; });   // ファイル名で照らす
+  rows.forEach(function (r, i) { index[r[0] + '\t' + r[2]] = i; });
+  var now = new Date();
+  list.forEach(function (t) {
+    if (!t || !t.f) return;
+    var row = [device, deviceName, t.f, t.s || '', t.c || '', t.no || '', t.t || '', num_(t.pc), Math.round(num_(t.ls)), Math.round(num_(t.lc)),
+      num_(t.lp), t.st || 'none', num_(t.sa), Math.round(num_(t.pos)), num_(t.pa), now];
+    var k = device + '\t' + t.f;
+    if (index[k] !== undefined) rows[index[k]] = row;
+    else { index[k] = rows.length; rows.push(row); }
+  });
+  writeRows_(sh, rows, SYNC_T_HEAD.length);
+  return { rows: rows, changed: true };
+}
 
-  // 同じ単元のログは、いちばん新しいものだけを使う
-  var latest = {};
-  logs.forEach(function (l) {
-    if (!l || !l.fileName) return;
-    var k = l.fileName;
-    if (!latest[k] || String(l.timestamp) >= String(latest[k].timestamp)) latest[k] = l;
+function upsertSyncDaily_(ss, device, deviceName, list) {
+  var sh = sheet_(ss, SYNC_D_SHEET, SYNC_D_HEAD);
+  var rows = readRows_(sh, SYNC_D_HEAD.length).map(function (r) {
+    if (r[2] instanceof Date) r[2] = Utilities.formatDate(r[2], Session.getScriptTimeZone(), 'yyyy-MM-dd');
+    else r[2] = String(r[2]);
+    return r;
+  });
+  if (!list.length) return { rows: rows, changed: false };
+  var index = {};
+  rows.forEach(function (r, i) { index[r[0] + '\t' + r[2]] = i; });
+  var now = new Date();
+  list.forEach(function (x) {
+    if (!x || !x.k) return;
+    var row = [device, deviceName, String(x.k), Math.round(num_(x.r)), Math.round(num_(x.l)), now];
+    var k = device + '\t' + x.k;
+    if (index[k] !== undefined) rows[index[k]] = row;
+    else { index[k] = rows.length; rows.push(row); }
+  });
+  if (rows.length) sh.getRange(2, 3, rows.length, 1).setNumberFormat('@');   // 日付を文字のまま
+  writeRows_(sh, rows, SYNC_D_HEAD.length);
+  return { rows: rows, changed: true };
+}
+
+// 全端末を合わせて 単元マスタ を作り直す
+function rebuildMaster_(ss, syncRows) {
+  var by = {};
+  syncRows.forEach(function (r) {
+    var f = r[2];
+    var m = by[f] || (by[f] = { s: r[3], c: r[4], no: r[5], t: r[6], pc: 0, ls: 0, lc: 0, lp: 0, st: 'none', sa: -1, dev: {} });
+    m.pc += num_(r[7]); m.ls += num_(r[8]); m.lc += num_(r[9]);
+    if (num_(r[10]) > m.lp) m.lp = num_(r[10]);
+    if (num_(r[12]) > m.sa) { m.sa = num_(r[12]); m.st = r[11] || 'none'; }
+    if (num_(r[8]) > 0 && r[1]) m.dev[r[1]] = 1;
   });
   var now = new Date();
-  Object.keys(latest).forEach(function (k) {
-    var l = latest[k];
-    var row = [
-      l.subject || '', l.course || '', l.no || '', l.title || '', l.fileName,
-      Number(l.playCount) || 0,
-      Math.round((Number(l.totalListenedSeconds) || 0) / 6) / 10,
-      Math.round((Number(l.totalLectureSeconds) || 0) / 6) / 10,
-      toDate_(l.lastPlayedAt), l.status || '', now
-    ];
-    if (index[k] !== undefined) {
-      data[index[k]] = row;   // アプリの累計値でそのまま上書き（足し算しないので、ずれない）
-    } else {
-      index[k] = data.length;
-      data.push(row);
-    }
+  var out = Object.keys(by).map(function (f) {
+    var m = by[f];
+    return [m.s, m.c, m.no, m.t, f, Math.max(0, m.pc), Math.round(m.ls / 6) / 10, Math.round(m.lc / 6) / 10,
+      m.lp ? new Date(m.lp) : '', STATUS_LABEL[m.st] || m.st, Object.keys(m.dev).join('・'), now];
   });
-  data.sort(function (a, b) {
+  out.sort(function (a, b) {
     if (a[0] !== b[0]) return String(a[0]) < String(b[0]) ? -1 : 1;
     if (a[1] !== b[1]) return String(a[1]) < String(b[1]) ? -1 : 1;
     return (Number(a[2]) || 0) - (Number(b[2]) || 0);
   });
-  if (data.length) sh.getRange(2, 1, data.length, MASTER_HEAD.length).setValues(data);
+  writeRows_(sheet_(ss, MASTER_SHEET, MASTER_HEAD), out, MASTER_HEAD.length);
 }
 
-function updateDaily_(ss, daily) {
-  var keys = Object.keys(daily);
-  if (!keys.length) return;
-  var sh = sheet_(ss, DAILY_SHEET, DAILY_HEAD);
-  var last = sh.getLastRow();
-  var data = last > 1 ? sh.getRange(2, 1, last - 1, DAILY_HEAD.length).getValues() : [];
-  var index = {};
-  data.forEach(function (r, i) {
-    var k = r[0] instanceof Date ? Utilities.formatDate(r[0], Session.getScriptTimeZone(), 'yyyy-MM-dd') : String(r[0]);
-    r[0] = k;
-    index[k] = i;
+function rebuildDaily_(ss, syncRows) {
+  var by = {};
+  syncRows.forEach(function (r) {
+    var k = String(r[2]);
+    var d = by[k] || (by[k] = { r: 0, l: 0 });
+    d.r += num_(r[3]); d.l += num_(r[4]);
   });
   var now = new Date();
-  keys.forEach(function (k) {
-    var x = daily[k] || {};
-    var row = [k, Math.round((Number(x.real) || 0) / 6) / 10, Math.round((Number(x.lecture) || 0) / 6) / 10, now];
-    if (index[k] !== undefined) data[index[k]] = row;
-    else { index[k] = data.length; data.push(row); }
+  var out = Object.keys(by).sort().map(function (k) {
+    return [k, Math.round(by[k].r / 6) / 10, Math.round(by[k].l / 6) / 10, now];
   });
-  data.sort(function (a, b) { return a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0; });
-  sh.getRange(2, 1, data.length, 1).setNumberFormat('@');   // 日付を文字のまま入れる
-  sh.getRange(2, 1, data.length, DAILY_HEAD.length).setValues(data);
+  var sh = sheet_(ss, DAILY_SHEET, DAILY_HEAD);
+  if (out.length) sh.getRange(2, 1, out.length, 1).setNumberFormat('@');
+  writeRows_(sh, out, DAILY_HEAD.length);
 }

@@ -5,7 +5,7 @@
 (function () {
   'use strict';
 
-  var APP_VERSION = '1.1.0';
+  var APP_VERSION = '1.2.0';
   var RATES = [1.0, 1.3, 1.5, 1.8, 2.0, 2.2];
   var STATUS_LIST = [
     { key: 'none', label: '未評価', mark: '' },
@@ -19,7 +19,8 @@
   var LOG_EVERY_SEC = 300;  // 続けて聞いているときも 5 分ごとに送信キューへ
   var K = {
     settings: 'sap.settings', daily: 'sap.daily', queue: 'sap.queue',
-    last: 'sap.last', rate: 'sap.rate', ui: 'sap.ui', sync: 'sap.sync'
+    last: 'sap.last', rate: 'sap.rate', ui: 'sap.ui', sync: 'sap.sync',
+    device: 'sap.device', dbase: 'sap.dbase', sdirty: 'sap.sdirty'
   };
 
   function $(id) { return document.getElementById(id); }
@@ -91,6 +92,10 @@
   if (settings.gasUrl === undefined) settings.gasUrl = '';
   if (settings.secret === undefined) settings.secret = '';
   if (settings.subject === undefined) settings.subject = '';
+  if (settings.deviceName === undefined) {
+    var ua = navigator.userAgent || '';
+    settings.deviceName = /iPad/.test(ua) ? 'iPad' : /iPhone/.test(ua) ? 'iPhone' : /Android/.test(ua) ? 'Android' : 'パソコン';
+  }
   var daily = lsGet(K.daily, {});     // { "2026-11-18": { r: 実秒, l: 講義秒 } }
   var queue = lsGet(K.queue, []);     // 未送信のログ
   var ui = lsGet(K.ui, { tab: 'list', subject: '', view: 'all', sort: 'no' });
@@ -248,6 +253,7 @@
     sortTracks();
     var gs = Object.keys(touched);
     if (gs.length === 1) { ui.subject = 'g:' + gs[0]; lsSet(K.ui, ui); }
+    if (added) { syncState.lastPull = 0; scheduleSend(500); }
     renderAll();
     toast(added + ' 件取り込みました' + (gs.length ? '（' + gs.join('・') + '）' : '') +
       (skipped ? '　同じ名前の ' + skipped + ' 件は飛ばしました' : ''), 5000);
@@ -412,7 +418,9 @@
     }
     if (audio.paused || audio.ended) lastMedia = null;
     else { lastMedia = ct; lastWall = now; }
-    cur.lastPos = audio.ended ? 0 : ct;
+    var np = audio.ended ? 0 : ct;
+    if (np !== (cur.lastPos || 0)) { cur.posAt = now; markSyncT(cur); }
+    cur.lastPos = np;
     checkLap(ct);
   }
   function addListen(real, lecture) {
@@ -424,6 +432,7 @@
     cur.lapLec = (cur.lapLec || 0) + lecture;
     session.r += real; session.l += lecture;
     markDirty(cur);
+    markSyncT(cur); markSyncD(k);
     lsSet(K.daily, daily);
     if (Date.now() - lastSaveAt > 10000) { lastSaveAt = Date.now(); saveDirty(); saveLast(); }
     if (session.r >= LOG_EVERY_SEC) flushSession('listening');
@@ -436,6 +445,7 @@
       cur.lastPlayedAt = Date.now();
       cur.lapLec = 0;
       markDirty(cur);
+      markSyncT(cur);
       saveDirty();
       flushSession('complete');
       toast('「' + cur.name + '」' + cur.playCount + ' 周目を記録しました', 3000);
@@ -477,60 +487,167 @@
     session = { r: 0, l: 0 };
     saveDirty();
   }
-  var sendTimer = null, sending = false;
-  function scheduleSend() {
-    if (sendTimer) clearTimeout(sendTimer);
-    sendTimer = setTimeout(sendQueue, 3000);
+  /* ---------- 端末どうしの同期 ----------
+   * 各端末は「この端末で聞いた分（own）」だけを送り、全端末の分を読み戻して足す。
+   * 周回・聴取時間：合計（t.base＝ほかの端末の合計、表示する数＝own＋base）
+   * 理解度・停止位置：いちばん新しく変えた端末のもの
+   */
+  var deviceId = lsGet(K.device, '');
+  if (!deviceId) { deviceId = 'd' + uid(); lsSet(K.device, deviceId); }
+  var dailyBase = lsGet(K.dbase, {});              // ほかの端末の日別の合計
+  var sdirty = lsGet(K.sdirty, { t: {}, d: {} });  // まだ送っていない変更（値は変更の番号）
+  var sdSeq = Date.now();
+  function markSyncT(t) { sdirty.t[t.name] = ++sdSeq; lsSet(K.sdirty, sdirty); }
+  function markSyncD(k) { sdirty.d[k] = ++sdSeq; lsSet(K.sdirty, sdirty); }
+  function hasSyncDirty() { return Object.keys(sdirty.t).length > 0 || Object.keys(sdirty.d).length > 0; }
+  function ownOf(t) {
+    var b = t.base || { pc: 0, ls: 0, lc: 0 };
+    return { pc: (t.playCount || 0) - b.pc, ls: Math.max(0, (t.listenedSec || 0) - b.ls), lc: Math.max(0, (t.lectureSec || 0) - b.lc) };
   }
-  function recentDaily() {
-    var out = {}, d = new Date();
-    for (var i = 0; i < 3; i++) {
-      var k = dateKey(d);
-      if (daily[k]) out[k] = { real: Math.round(daily[k].r), lecture: Math.round(daily[k].l) };
-      d.setDate(d.getDate() - 1);
+  function ownDay(k) {
+    var x = daily[k] || { r: 0, l: 0 }, b = dailyBase[k] || { r: 0, l: 0 };
+    return { r: Math.max(0, x.r - b.r), l: Math.max(0, x.l - b.l) };
+  }
+  function syncPayload() {
+    var p = { tracks: [], daily: [], snapT: {}, snapD: {} }, byName = {};
+    tracks.forEach(function (t) { byName[t.name] = t; });
+    Object.keys(sdirty.t).forEach(function (n) {
+      p.snapT[n] = sdirty.t[n];
+      var t = byName[n];
+      if (!t) return;
+      var o = ownOf(t);
+      p.tracks.push({ f: t.name, s: t.subject, c: t.course || '', no: t.no, t: titleOf(t), pc: o.pc, ls: Math.round(o.ls), lc: Math.round(o.lc),
+        lp: t.lastPlayedAt || 0, st: t.status || 'none', sa: t.statusAt || 0, pos: Math.round(t.lastPos || 0), pa: t.posAt || 0 });
+    });
+    Object.keys(sdirty.d).forEach(function (k) {
+      p.snapD[k] = sdirty.d[k];
+      var o = ownDay(k);
+      p.daily.push({ k: k, r: Math.round(o.r), l: Math.round(o.l) });
+    });
+    return p;
+  }
+  function clearSnap(p) {
+    // 送っている間にまた変わったものは残す
+    Object.keys(p.snapT).forEach(function (n) { if (sdirty.t[n] === p.snapT[n]) delete sdirty.t[n]; });
+    Object.keys(p.snapD).forEach(function (k) { if (sdirty.d[k] === p.snapD[k]) delete sdirty.d[k]; });
+    lsSet(K.sdirty, sdirty);
+  }
+  function applyPull(j) {
+    if (!j || !j.tracks) return;
+    var devs = {}, rowsBy = {}, latest = null;
+    var playingId = cur && curUrl && !audio.paused ? cur.id : null;
+    j.tracks.forEach(function (r) { devs[r.d] = r.dn || ''; (rowsBy[r.f] = rowsBy[r.f] || []).push(r); });
+    (j.daily || []).forEach(function (r) { if (!(r.d in devs)) devs[r.d] = ''; });
+    tracks.forEach(function (t) {
+      var rows = rowsBy[t.name];
+      if (!rows) return;
+      var own = ownOf(t), base = { pc: 0, ls: 0, lc: 0 }, mine = null;
+      rows.forEach(function (r) {
+        if (r.d === deviceId) { mine = r; return; }
+        base.pc += r.pc; base.ls += r.ls; base.lc += r.lc;
+        if (r.pa > (t.posAt || 0) && t.id !== playingId) { t.lastPos = r.pos; t.posAt = r.pa; }
+        if (r.pa && (!latest || r.pa > latest.at)) latest = { id: t.id, pos: r.pos, at: r.pa };
+      });
+      if (mine) {
+        // 消して取り込み直した音声などは、前に送ってあったこの端末の分を戻す
+        own.ls = Math.max(own.ls, mine.ls); own.lc = Math.max(own.lc, mine.lc);
+        if (!t.syncSeen) own.pc = Math.max(own.pc, mine.pc);
+      }
+      t.syncSeen = true;
+      t.base = base;
+      t.playCount = own.pc + base.pc;
+      t.listenedSec = own.ls + base.ls;
+      t.lectureSec = own.lc + base.lc;
+      rows.forEach(function (r) {
+        if (r.lp > (t.lastPlayedAt || 0)) t.lastPlayedAt = r.lp;
+        if (r.sa > (t.statusAt || 0)) { t.status = r.st; t.statusAt = r.sa; }
+      });
+      markDirty(t);
+    });
+    // 日別
+    var nb = {}, mineD = {}, keys = {};
+    (j.daily || []).forEach(function (r) {
+      if (r.d === deviceId) { mineD[r.k] = r; return; }
+      var b = nb[r.k] || (nb[r.k] = { r: 0, l: 0 });
+      b.r += r.r; b.l += r.l;
+    });
+    [daily, nb, mineD].forEach(function (o) { Object.keys(o).forEach(function (k) { keys[k] = 1; }); });
+    var next = {};
+    Object.keys(keys).forEach(function (k) {
+      var o = ownDay(k), m = mineD[k], b = nb[k] || { r: 0, l: 0 };
+      if (m) { o.r = Math.max(o.r, m.r); o.l = Math.max(o.l, m.l); }
+      if (o.r + b.r > 0 || o.l + b.l > 0) next[k] = { r: o.r + b.r, l: o.l + b.l };
+    });
+    daily = next; dailyBase = nb;
+    lsSet(K.daily, daily); lsSet(K.dbase, dailyBase);
+    // ほかの端末で後から聞いていたら「前回の続きから」をそちらにする
+    var last = lsGet(K.last, null);
+    if (latest && latest.at > ((last && last.at) || 0) && !playingId) {
+      if (cur) stopPlayback();
+      lsSet(K.last, latest);
     }
-    return out;
+    syncState.devices = Object.keys(devs).length;
+    syncState.lastPull = Date.now();
+    saveDirty();
+    renderAll();
+  }
+
+  var sendTimer = null, sending = false;
+  function scheduleSend(ms) {
+    if (sendTimer) clearTimeout(sendTimer);
+    sendTimer = setTimeout(function () { sendQueue(); }, ms || 3000);
+  }
+  // 送って返事を読む。返事が読めない環境（TypeError）は no-cors で送って null を返す
+  async function postBody(body) {
+    try {
+      // text/plain にすると事前確認（プリフライト）が起きず GAS にそのまま届く
+      var res = await fetch(settings.gasUrl, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: body, redirect: 'follow' });
+      var txt = await res.text(), j = null;
+      try { j = JSON.parse(txt); } catch (e) { /* JSON でない */ }
+      if (j && j.ok) return j;
+      throw new Error((j && j.error) || ('返事が読めません（' + res.status + '）'));
+    } catch (e) {
+      // GAS から返事が来たのにエラー（合言葉違いなど）のときは、そのまま止める
+      if (!(e instanceof TypeError)) throw e;
+      await fetch(settings.gasUrl, { method: 'POST', mode: 'no-cors', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: body });
+      return null;
+    }
+  }
+  function removeSent(batch) {
+    var sent = {};
+    batch.forEach(function (l) { sent[l.id] = 1; });
+    queue = queue.filter(function (l) { return !sent[l.id]; });
+    lsSet(K.queue, queue);
   }
   async function sendQueue(manual) {
     if (!settings.gasUrl) { if (manual) toast('GAS の URL が入っていません'); return; }
     if (sending) return;
-    if (navigator.onLine === false) { if (manual) toast('いまは圏外です。つながったら自動で送ります'); return; }
-    if (!queue.length && !manual) return;
+    if (navigator.onLine === false) { if (manual) toast('いまは圏外です。つながったら自動で同期します'); return; }
+    var pullDue = Date.now() - (syncState.lastPull || 0) > 30000;
+    if (!manual && !queue.length && !hasSyncDirty() && !pullDue) return;
     sending = true;
     renderSync();
     try {
-      do {
-        var batch = queue.slice(0, 100);
-        var body = JSON.stringify({ secret: settings.secret || '', app: APP_VERSION, logs: batch, daily: recentDaily() });
-        var ok = false;
-        try {
-          // text/plain にすると事前確認（プリフライト）が起きず GAS にそのまま届く
-          var res = await fetch(settings.gasUrl, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: body, redirect: 'follow' });
-          var txt = await res.text();
-          var j = null;
-          try { j = JSON.parse(txt); } catch (e) { /* JSON でない */ }
-          if (j && j.ok) ok = true;
-          else throw new Error((j && j.error) || ('返事が読めません（' + res.status + '）'));
-        } catch (e) {
-          // GAS から返事が来たのにエラー（合言葉違いなど）のときは、キューを残したまま止める
-          if (!(e instanceof TypeError)) throw e;
-          // 返事が読めない環境向け：no-cors で送る（届いたかは分からないが、GAS 側で同じログは 2 回入らない）
-          await fetch(settings.gasUrl, { method: 'POST', mode: 'no-cors', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: body });
-          ok = true;
-        }
-        if (ok) {
-          var sent = {};
-          batch.forEach(function (l) { sent[l.id] = 1; });
-          queue = queue.filter(function (l) { return !sent[l.id]; });
-          lsSet(K.queue, queue);
-        }
-      } while (queue.length && batch.length);
+      var head = { secret: settings.secret || '', app: APP_VERSION, device: deviceId, deviceName: settings.deviceName || '' };
+      // ログがたまっているときは先に 100 件ずつ
+      while (queue.length > 100) {
+        var b = queue.slice(0, 100);
+        await postBody(JSON.stringify(Object.assign({}, head, { logs: b })));
+        removeSent(b);
+      }
+      var batch = queue.slice(0, 100);
+      var p = syncPayload();
+      var j = await postBody(JSON.stringify(Object.assign({}, head, { logs: batch, tracks: p.tracks, daily: p.daily, pull: true })));
+      removeSent(batch);   // ログは GAS 側で同じものを 2 回入れないので、届いたかあいまいでも消してよい
+      if (!j) throw new Error('返事が読めないため、ほかの端末の記録を読み戻せませんでした');
+      clearSnap(p);
+      applyPull(j);
       syncState.lastOk = Date.now(); syncState.lastErr = '';
-      if (manual) toast('送りました');
+      if (manual) toast('同期しました');
     } catch (e) {
       console.warn(e);
       syncState.lastErr = (e && e.message) || String(e);
-      if (manual) toast('送れませんでした：' + syncState.lastErr, 5000);
+      if (manual) toast('同期できませんでした：' + syncState.lastErr, 5000);
     } finally {
       sending = false;
       lsSet(K.sync, syncState);
@@ -627,7 +744,7 @@
   audio.addEventListener('ended', function () {
     accumulate();
     lastMedia = null;
-    if (cur) { cur.lastPos = 0; markDirty(cur); }
+    if (cur) { cur.lastPos = 0; cur.posAt = Date.now(); markDirty(cur); markSyncT(cur); }
     flushSession('ended');
     saveLast(); saveDirty();
     if (settings.autoNext) nextTrack(true);
@@ -910,14 +1027,18 @@
     if (!settings.gasUrl) {
       b.textContent = '同期なし'; b.className = 'sync-badge';
     } else if (sending) {
-      b.textContent = '送信中…'; b.className = 'sync-badge';
-    } else if (queue.length) {
-      b.textContent = '未送信 ' + queue.length; b.className = 'sync-badge warn';
+      b.textContent = '同期中…'; b.className = 'sync-badge';
+    } else if (syncState.lastErr) {
+      b.textContent = '同期できず'; b.className = 'sync-badge warn';
+    } else if (queue.length || hasSyncDirty()) {
+      b.textContent = '未同期'; b.className = 'sync-badge warn';
     } else {
       b.textContent = '同期済み'; b.className = 'sync-badge ok';
     }
-    var info = '未送信 ' + queue.length + ' 件';
-    if (syncState.lastOk) info += '　最後に送れた時刻 ' + new Date(syncState.lastOk).toLocaleString();
+    var info = 'この端末「' + (settings.deviceName || '名前なし') + '」　未送信のログ ' + queue.length + ' 件';
+    if (syncState.devices) info += '　同期している端末 ' + syncState.devices + ' 台';
+    if (syncState.lastPull) info += '　最後に同期した時刻 ' + new Date(syncState.lastPull).toLocaleString();
+    else if (syncState.lastOk) info += '　最後に送れた時刻 ' + new Date(syncState.lastOk).toLocaleString();
     if (syncState.lastErr) info += '　直近のエラー：' + syncState.lastErr;
     $('syncInfo').textContent = info;
   }
@@ -995,7 +1116,7 @@
     var data;
     try { data = JSON.parse(text.replace(/^﻿/, '')); } catch (e) { toast('読めないファイルです'); return; }
     if (!data || data.app !== 'studyAudioPlayer') { toast('このアプリの履歴ファイルではありません'); return; }
-    if (!confirm('履歴を読み込みます。同じ科目・同じファイル名の音声の記録を、ファイルの記録で置きかえます。日別の記録は多いほうを残します。よろしいですか？')) return;
+    if (!confirm('履歴を読み込みます。同じ科目・同じファイル名の音声の記録を、ファイルの記録で置きかえます。日別の記録は多いほうを残します。（GAS の同期を使っているときは、これは使わずに同じ URL を入れるだけで記録がそろいます）よろしいですか？')) return;
     var hit = 0, miss = 0;
     (data.tracks || []).forEach(function (b) {
       var t = null;
@@ -1095,7 +1216,7 @@
     $('statusRow').addEventListener('click', function (e) {
       var k = e.target.getAttribute('data-st');
       if (!k || !cur) return;
-      cur.status = k; markDirty(cur); saveDirty();
+      cur.status = k; cur.statusAt = Date.now(); markDirty(cur); markSyncT(cur); saveDirty();
       pushLog(cur, 'status', 0, 0);
       renderNow(); renderListMarks(); renderTiles();
     });
@@ -1111,7 +1232,7 @@
     $('syncBadge').addEventListener('click', openSettings);
     $('btnCloseSettings').addEventListener('click', function () { $('settings').classList.add('hidden'); });
     $('btnSaveSettings').addEventListener('click', function () { saveSettings(); toast('保存しました'); });
-    $('btnSendNow').addEventListener('click', function () { saveSettings(); sendQueue(true); });
+    $('btnSendNow').addEventListener('click', function () { saveSettings(); syncState.lastPull = 0; sendQueue(true); });
     $('btnCsvTracks').addEventListener('click', function () { download('学習音声_単元_' + stamp() + '.csv', tracksCsv()); });
     $('btnCopyTracks').addEventListener('click', function () { copyText(tracksCsv()); });
     $('btnCsvDaily').addEventListener('click', function () { download('学習音声_日別_' + stamp() + '.csv', dailyCsv()); });
@@ -1132,8 +1253,10 @@
       if (!confirm('本当にすべて消しますか？')) return;
       stopPlayback();
       Promise.all([idbClear('audio'), idbClear('tracks')]).then(function () {
-        tracks = []; byId = {}; daily = {}; queue = [];
-        [K.daily, K.queue, K.last].forEach(function (k) { localStorage.removeItem(k); });
+        tracks = []; byId = {}; daily = {}; queue = []; dailyBase = {}; sdirty = { t: {}, d: {} };
+        [K.daily, K.queue, K.last, K.dbase, K.sdirty].forEach(function (k) { localStorage.removeItem(k); });
+        deviceId = 'd' + uid(); lsSet(K.device, deviceId);
+        syncState = { lastOk: 0, lastErr: '' }; lsSet(K.sync, syncState);
         renderAll(); renderStorage(); toast('すべて消しました');
       });
     });
@@ -1155,7 +1278,7 @@
     if (!cur) return;
     cur.playCount = Math.max(0, (cur.playCount || 0) + n);
     if (n > 0) { cur.lastPlayedAt = Date.now(); cur.lapLec = 0; }
-    markDirty(cur); saveDirty();
+    markDirty(cur); markSyncT(cur); saveDirty();
     pushLog(cur, n > 0 ? 'manual+1' : 'manual-1', 0, 0);
     renderNow(); renderListMarks(); renderTiles(); renderHero();
   }
@@ -1166,6 +1289,7 @@
     $('sTrackBtn').value = settings.trackBtn;
     $('sGasUrl').value = settings.gasUrl || '';
     $('sSecret').value = settings.secret || '';
+    $('sDeviceName').value = settings.deviceName || '';
     renderSync(); renderStorage();
     $('settings').classList.remove('hidden');
   }
@@ -1177,6 +1301,7 @@
     settings.trackBtn = $('sTrackBtn').value;
     settings.gasUrl = $('sGasUrl').value.trim();
     settings.secret = $('sSecret').value.trim();
+    settings.deviceName = $('sDeviceName').value.trim();
     lsSet(K.settings, settings);
     renderHero(); renderStats(); renderSync();
   }
@@ -1214,7 +1339,7 @@
     }
     renderAll();
     sendQueue();
-    setInterval(function () { if (queue.length) sendQueue(); }, 60000);
+    setInterval(function () { if (queue.length || hasSyncDirty()) sendQueue(); }, 60000);
     // 日付が変わったら表示を直す
     setInterval(function () { tickHero(true); }, 60000);
     if ('serviceWorker' in navigator) {
@@ -1225,7 +1350,8 @@
   // テスト用（ふだんは使わない）
   window.__sap = {
     importFiles: importFiles, get tracks() { return tracks; }, get daily() { return daily; }, get queue() { return queue; },
-    get cur() { return cur; }, audio: audio, loadTrack: loadTrack, sendQueue: sendQueue
+    get cur() { return cur; }, audio: audio, loadTrack: loadTrack, sendQueue: sendQueue,
+    get deviceId() { return deviceId; }, get sdirty() { return sdirty; }, applyPull: function (j) { applyPull(j); }
   };
 
   start();
