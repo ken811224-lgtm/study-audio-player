@@ -2,7 +2,7 @@
  * 音声そのものは IndexedDB に入っているので、ここではしまわない
  * 版を上げたら CACHE の名前も変える（変えると新しい部品に入れかわる）
  */
-var CACHE = 'sap-v1.4.3';
+var CACHE = 'sap-v1.5.0';
 var FILES = [
   './',
   'index.html',

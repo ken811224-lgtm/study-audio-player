@@ -5,7 +5,7 @@
 (function () {
   'use strict';
 
-  var APP_VERSION = '1.4.3';
+  var APP_VERSION = '1.5.0';
   var RATES = [1.0, 1.3, 1.5, 1.8, 2.0, 2.2];
   var STATUS_LIST = [
     { key: 'none', label: '未評価', mark: '' },
@@ -301,7 +301,7 @@
         added++;
       } catch (e) {
         console.error(e);
-        toast('「' + f.name + '」で止まりました（' + ((e && e.name) || e) + '）。スマホの空き容量が足りないかもしれません', 8000);
+        toast('「' + f.name + '」で止まりました：' + errMsg(e), 8000);
         break;
       }
     }
@@ -318,6 +318,7 @@
     if (replaced) msg.push(replaced + ' 件の音声を差し替えました');
     if (skipped) msg.push('同じ名前の ' + skipped + ' 件は取り込みませんでした');
     toast(msg.join('　'), 5000);
+    if (!opts.replace) setTimeout(storageWarn, 5200);
   }
 
   /* ---------- Drive から取り込む ---------- */
@@ -357,13 +358,14 @@
   function driveState(f) {
     var t = findSame(infoOf(f.name, settings.subject), f.name);
     if (!t) return { st: 'new' };
+    if (t.offline) return { st: 'gone', t: t };
     if (t.driveId === f.id) return { st: (f.updated > (t.driveUpdated || 0) + 1000) ? 'newer' : 'have', t: t };
     if (t.size === f.size) return { st: 'have', t: t };
     return { st: 'diff', t: t };
   }
   var DRIVE_LABEL = {
     'new': 'まだ取り込んでいません', have: '取り込み済み',
-    newer: 'Drive の方が新しくなっています（録り直し？）', diff: '取り込み済みのものと大きさが違います（差し替えるならチェック）'
+    newer: 'Drive の方が新しくなっています（録り直し？）', gone: 'スマホから外してあります（チェックすると取り直す。記録はそのまま）', diff: '取り込み済みのものと大きさが違います（差し替えるならチェック）'
   };
   var driveFiles = [], driveBusy = false;
   function fmtMB(b) { return (b / 1048576).toFixed(1) + 'MB'; }
@@ -428,18 +430,20 @@
           $('driveProg').textContent = head + Math.floor(r * 100) + '%　' + f.name;
         });
         f.prog = 'しまっています…'; renderDrive();
-        await importFiles([{ name: f.name, type: f.type || 'audio/mpeg', size: f.size, _buf: buf, driveId: f.id, driveUpdated: f.updated }], settings.subject, { replace: true });
+        if (f.state.t && f.state.t.offline) { await restoreAudio(f.state.t, f, buf); }
+        else await importFiles([{ name: f.name, type: f.type || 'audio/mpeg', size: f.size, _buf: buf, driveId: f.id, driveUpdated: f.updated }], settings.subject, { replace: true });
         buf = null;
         f.state = driveState(f); f.checked = false; f.prog = null;
         done++;
       } catch (e) {
         console.error(e);
-        f.prog = '止まりました：' + (e.message || e.name || e);
+        f.prog = '止まりました：' + errMsg(e);
         failed++;
       }
       renderDrive();
     }
     driveBusy = false; renderDrive();
+    renderAll(); storageWarn();
     $('driveProg').textContent = done + ' 本取り込みました' + (failed ? '（' + failed + ' 本は止まりました。チェックを付け直して［選んだものを取り込む］でやり直せます）' : '');
     toast($('driveProg').textContent, 5000);
   }
@@ -460,6 +464,7 @@
     t.lastPos = 0;
     t.lapLec = 0;
     t.replacedAt = Date.now();
+    t.offline = false;
     if (file.driveId) { t.driveId = file.driveId; t.driveUpdated = file.driveUpdated || 0; }
     markDirty(t);
     await saveDirty();
@@ -490,6 +495,91 @@
     renderAll();
   }
 
+  /* ---------- スマホから音声だけ外す・Drive から取り直す ---------- */
+  var LIMIT_WARN = 800 * 1048576;   // 古い iPhone（iOS 15 まで）は 1GB くらいで入らなくなる
+  function errMsg(e) {
+    if (e && (e.name === 'QuotaExceededError' || /quota/i.test(e.message || ''))) return 'スマホの保存場所がいっぱいです。聞き終わったコースの「音声だけ外す」で空けてください';
+    return (e && (e.message || e.name)) || String(e);
+  }
+  function localBytes() {
+    var n = 0, b = 0;
+    tracks.forEach(function (t) { if (!t.offline) { n++; b += t.size || 0; } });
+    return { n: n, b: b };
+  }
+  function storageWarn() {
+    var u = localBytes();
+    if (u.b >= LIMIT_WARN) toast('スマホにしまった音声が ' + Math.round(u.b / 1048576) + 'MB になりました。1GB くらいで入らなくなることがあります。聞き終わったコースは「音声だけ外す」を', 8000);
+  }
+  var driveCache = null, driveCacheAt = 0;
+  async function getDriveList(force) {
+    if (!force && driveCache && Date.now() - driveCacheAt < 300000) return driveCache;
+    var j = await drivePost({ action: 'driveList' }, 2);
+    driveCache = j.files || []; driveCacheAt = Date.now();
+    return driveCache;
+  }
+  // その講義の音声を Drive の中から探す（Drive から取ったものは ID で、ほかは名前で）
+  function matchDrive(t, list) {
+    var i, f;
+    if (t.driveId) for (i = 0; i < list.length; i++) if (list[i].id === t.driveId) return list[i];
+    var key = sameKey(t.name);
+    for (i = 0; i < list.length; i++) {
+      f = list[i];
+      var fi = infoOf(f.name, settings.subject);
+      if (fi.subject === t.subject && (fi.course || '') === (t.course || '') && sameKey(f.name) === key) return f;
+    }
+    return null;
+  }
+  // Drive から受け取った中身をしまう。記録はそのまま。録り直しで大きさが変わっていたら位置は最初から
+  async function restoreAudio(t, f, buf) {
+    var changed = !!(t.size && f.size !== t.size);
+    await idbPut('audio', audioRec(t.id, f.type, buf));
+    t.offline = false; t.driveId = f.id; t.driveUpdated = f.updated;
+    if (changed) { t.size = f.size; t.duration = 0; t.lastPos = 0; t.lapLec = 0; t.replacedAt = Date.now(); }
+    markDirty(t);
+    await saveDirty();
+    return changed;
+  }
+  async function fetchOffline(t, onProgress) {
+    if (!settings.gasUrl) throw new Error('⚙ 設定に GAS の URL を入れてください');
+    if (navigator.onLine === false) throw new Error('いまは圏外です');
+    var f = matchDrive(t, await getDriveList());
+    if (!f) f = matchDrive(t, await getDriveList(true));
+    if (!f) throw new Error('Drive の音声フォルダに「' + t.name + '」が見つかりません');
+    var buf = await driveDownload(f, onProgress);
+    return restoreAudio(t, f, buf);
+  }
+  async function removeAudio(list) {
+    for (var i = 0; i < list.length; i++) {
+      var t = list[i];
+      if (t.offline) continue;
+      if (cur && cur.id === t.id) stopPlayback();
+      await idbDel('audio', t.id);
+      t.offline = true;
+      markDirty(t);
+    }
+    await saveDirty();
+    renderAll(); renderStorage();
+  }
+  // 外す前に、Drive から取り直せるかを確かめる（取り直せないものがあれば知らせる）
+  async function confirmRemove(list) {
+    list = list.filter(function (t) { return !t.offline; });
+    if (!list.length) { toast('スマホにある音声はありません'); return null; }
+    var miss = [];
+    if (settings.gasUrl && navigator.onLine !== false) {
+      toast('Drive にあるか確かめています…', 20000);
+      try {
+        var dl = await getDriveList(true);
+        miss = list.filter(function (t) { return !matchDrive(t, dl); });
+      } catch (e) { miss = null; }
+      toast('', 1);
+    } else miss = null;
+    var msg = list.length + ' 本の音声をスマホから外します。\n周回数・聴取時間・理解度などの記録は残り、☁ の講義を押せば Drive から取り直して再生します。';
+    if (miss === null) msg += '\n\n（いま Drive を確かめられませんでした。Drive の音声フォルダに同じ名前の音声があることを確かめてから外してください）';
+    else if (miss.length) msg += '\n\n※ 次の ' + miss.length + ' 本は Drive に見つかりません。外すと Drive からは取り直せません：\n' +
+      miss.slice(0, 5).map(function (t) { return '・' + t.name; }).join('\n') + (miss.length > 5 ? '\n…ほか ' + (miss.length - 5) + ' 本' : '');
+    return confirm(msg + '\n\nよろしいですか？') ? list : null;
+  }
+
   /* ---------- 再生（audio 要素は 1 つだけを使い回す） ---------- */
   var audio = $('audio');
   var cur = null;          // 再生中の単元
@@ -510,9 +600,26 @@
     if (curUrl) { URL.revokeObjectURL(curUrl); curUrl = null; }
   }
 
+  var fetchingId = null;
   async function loadTrack(id, startPos, autoplay) {
     var t = byId[id];
     if (!t) return;
+    if (t.offline) {
+      if (fetchingId) { toast('いま Drive から受け取り中です。終わるまで待ってください', 3000); return; }
+      fetchingId = id;
+      toast('☁ Drive から受け取ります…　' + titleOf(t), 60000);
+      try {
+        var changed = await fetchOffline(t, function (r) { toast('☁ Drive から受け取り中 ' + Math.floor(r * 100) + '%　' + titleOf(t), 60000); });
+        if (changed) startPos = 0;
+      } catch (e) {
+        console.error(e);
+        toast('Drive から受け取れませんでした：' + errMsg(e), 7000);
+        return;
+      } finally { fetchingId = null; }
+      toast('受け取りました' + (autoplay ? '（始まらないときは ▶ を押してください）' : ''), 3000);
+      renderList(); renderTiles();
+      storageWarn();
+    }
     accumulate();
     flushSession('switch');
     var rec = await idbGet('audio', id);
@@ -1097,6 +1204,7 @@
       if (!matchFilter(t, ui.subject)) return false;
       if (ui.view === 'unheard') return !(t.playCount > 0) && !(t.listenedSec > 0);
       if (ui.view === 'review') return t.status === 'again' || t.status === 'text';
+      if (ui.view === 'local') return !t.offline;
       return true;
     });
     if (ui.sort === 'count') {
@@ -1143,10 +1251,10 @@
     list.forEach(function (t) {
       var prog = t.duration ? Math.min(100, Math.round((t.lastPos || 0) / t.duration * 100)) : 0;
       var mk = statusMark(t.status);
-      html += '<li class="track' + (cur && cur.id === t.id ? ' cur' : '') + '" data-id="' + t.id + '">' +
+      html += '<li class="track' + (cur && cur.id === t.id ? ' cur' : '') + (t.offline ? ' off' : '') + '" data-id="' + t.id + '">' +
         '<div class="track-no ' + lapClass(t.playCount) + '">' + t.no + '</div>' +
         '<div class="track-body"><div class="track-name">' + (showSub ? '<span class="hint">' + esc(groupOf(t)) + '｜</span>' : '') + esc(titleOf(t)) + '</div>' +
-        '<div class="track-meta">周回 ' + (t.playCount || 0) + '　最終 ' + fmtDate(t.lastPlayedAt) + '　累計 ' + fmtMin(t.listenedSec) +
+        '<div class="track-meta">' + (t.offline ? '☁ スマホになし（押すと Drive から取る）　' : '') + '周回 ' + (t.playCount || 0) + '　最終 ' + fmtDate(t.lastPlayedAt) + '　累計 ' + fmtMin(t.listenedSec) +
         (t.duration ? '　長さ ' + fmtTime(t.duration) : '') + '</div>' +
         '<div class="track-prog"><div style="width:' + prog + '%"></div></div></div>' +
         '<div class="track-mark mk-' + t.status + '">' + mk + '</div></li>';
@@ -1191,7 +1299,7 @@
       list.forEach(function (t) { sum += t.playCount || 0; });
       html += '<div class="tile-sub">' + esc(s) + '　' + done + ' / ' + list.length + ' 単元を 1 周以上（のべ ' + sum + ' 周）</div><div class="tile-grid">';
       list.forEach(function (t) {
-        html += '<button type="button" class="tile ' + lapClass(t.playCount) + (cur && cur.id === t.id ? ' cur' : '') + '" data-id="' + t.id + '" title="' + esc(titleOf(t)) + '">' +
+        html += '<button type="button" class="tile ' + lapClass(t.playCount) + (cur && cur.id === t.id ? ' cur' : '') + (t.offline ? ' off' : '') + '" data-id="' + t.id + '" title="' + esc(titleOf(t)) + '">' +
           t.no + (statusMark(t.status) ? '<span class="tm">' + statusMark(t.status) + '</span>' : '') + '</button>';
       });
       html += '</div>';
@@ -1390,10 +1498,13 @@
   }
   function renderStorage() {
     var el = $('storageInfo');
-    var total = 0;
-    tracks.forEach(function (t) { total += t.size || 0; });
-    var txt = '音声 ' + tracks.length + ' 件・約 ' + (total / 1048576).toFixed(0) + 'MB';
+    var u = localBytes(), off = tracks.length - u.n;
+    var txt = 'スマホにある音声 ' + u.n + ' 本・約 ' + Math.round(u.b / 1048576) + 'MB（1GB の ' + Math.min(999, Math.round(u.b / 10737418.24)) + '%）' +
+      (off ? '　外してある音声 ' + off + ' 本' : '');
     el.textContent = txt;
+    var bar = $('storageBar'), pct = Math.min(100, u.b / 10737418.24);
+    bar.style.width = pct + '%';
+    bar.className = 'gauge-bar' + (u.b >= 1073741824 * 0.95 ? ' full' : u.b >= LIMIT_WARN ? ' warn' : '');
     if (navigator.storage && navigator.storage.estimate) {
       navigator.storage.estimate().then(function (e) {
         el.textContent = txt + '（このアプリが使える量の目安：' + ((e.usage || 0) / 1048576).toFixed(0) + 'MB / ' + ((e.quota || 0) / 1048576).toFixed(0) + 'MB）';
@@ -1522,6 +1633,45 @@
         toast('差し替えできませんでした。スマホの空き容量が足りないかもしれません', 6000);
       });
     });
+    $('btnOffTrack').addEventListener('click', function () {
+      if (!cur) return;
+      confirmRemove([cur]).then(function (list) {
+        if (list) removeAudio(list).then(function () { toast('音声を外しました（記録は残っています）'); });
+      });
+    });
+    $('btnOffSubject').addEventListener('click', function () {
+      var s = $('delSubject').value;
+      if (!s) return;
+      confirmRemove(tracks.filter(function (t) { return groupOf(t) === s; })).then(function (list) {
+        if (list) removeAudio(list).then(function () { toast(list.length + ' 本の音声を外しました（記録は残っています）', 4000); });
+      });
+    });
+    $('btnGetSubject').addEventListener('click', async function () {
+      var s = $('delSubject').value;
+      if (!s || fetchingId) return;
+      var list = tracks.filter(function (t) { return groupOf(t) === s && t.offline; });
+      if (!list.length) { toast('このコースは全部スマホにあります'); return; }
+      if (!confirm('「' + s + '」の ' + list.length + ' 本を Drive から取ります（Wi-Fi のときに。終わるまで画面を消さないでください）。よろしいですか？')) return;
+      var done = 0;
+      for (var i = 0; i < list.length; i++) {
+        var t = list[i], head = (i + 1) + ' / ' + list.length + ' 本目 ';
+        fetchingId = t.id;
+        try {
+          await fetchOffline(t, function (r) { toast('☁ ' + head + Math.floor(r * 100) + '%　' + titleOf(t), 60000); });
+          done++;
+        } catch (e) {
+          console.error(e);
+          fetchingId = null;
+          toast('「' + titleOf(t) + '」で止まりました：' + errMsg(e), 8000);
+          break;
+        }
+        fetchingId = null;
+      }
+      fetchingId = null;
+      renderAll(); renderStorage();
+      if (done === list.length) toast(done + ' 本を Drive から取りました', 4000);
+      storageWarn();
+    });
     $('btnDeleteTrack').addEventListener('click', function () {
       if (!cur) return;
       if (!confirm('「' + cur.name + '」の音声と記録を消します。元に戻せません。よろしいですか？')) return;
@@ -1545,7 +1695,7 @@
       var s = $('delSubject').value;
       if (!s) return;
       var list = tracks.filter(function (t) { return groupOf(t) === s; });
-      if (!confirm('「' + s + '」の音声 ' + list.length + ' 件と、その周回などの記録を消します。元に戻せません。よろしいですか？')) return;
+      if (!confirm('「' + s + '」の音声 ' + list.length + ' 件と、その周回などの記録をこのスマホから消します。元に戻せません。\n（記録を残したいときは「このコースの音声だけ外す」）よろしいですか？')) return;
       deleteTracks(list).then(function () { renderStorage(); toast('消しました'); });
     });
     $('btnDelAll').addEventListener('click', function () {
