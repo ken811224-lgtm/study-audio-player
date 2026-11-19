@@ -33,7 +33,7 @@ var SYNC_T_HEAD = ['端末ID', '端末名', 'ファイル名', '科目', 'コー
 var SYNC_D_HEAD = ['端末ID', '端末名', '日付', '実秒', '講義秒', '更新日時'];
 var EVENT_NAME = {
   pause: '一時停止', ended: '最後まで', complete: '周回 +1', 'switch': '曲を変えた', stop: '停止',
-  listening: '聴取中', close: '閉じた', status: '理解度を変えた', 'manual+1': '手で +1', 'manual-1': '手で -1'
+  listening: '聴取中', close: '閉じた', status: '理解度を変えた', 'manual+1': '手で +1', 'manual-1': '手で -1', replace: '音声を差し替え'
 };
 var STATUS_LABEL = { none: '未評価', good: '◎ 完璧', again: '△ もう一度', text: '× 要テキスト確認' };
 

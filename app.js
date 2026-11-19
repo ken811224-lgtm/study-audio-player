@@ -5,7 +5,7 @@
 (function () {
   'use strict';
 
-  var APP_VERSION = '1.2.1';
+  var APP_VERSION = '1.3.0';
   var RATES = [1.0, 1.3, 1.5, 1.8, 2.0, 2.2];
   var STATUS_LIST = [
     { key: 'none', label: '未評価', mark: '' },
@@ -218,14 +218,35 @@
     files.sort(function (a, b) { return natcmp(a.name, b.name); });
     if (!files.length) { toast('音声ファイルが選ばれていません'); return; }
     if (navigator.storage && navigator.storage.persist) { try { await navigator.storage.persist(); } catch (e) { /* 無視 */ } }
-    var added = 0, skipped = 0;
-    for (var i = 0; i < files.length; i++) {
-      var f = files[i];
+    // もう取り込んである講義（同じ科目・コースで、名前が同じ。録り直しの「_2」も同じとみなす）
+    var plan = files.map(function (f) {
       var pn = parseName(f.name);
       var info = pn || { subject: subject, course: '', title: f.name.replace(/\.[^.]+$/, '') };
-      var exists = tracks.some(function (t) { return t.subject === info.subject && (t.course || '') === info.course && t.name === f.name; });
-      if (exists) { skipped++; continue; }
-      toast('取り込み中 ' + (i + 1) + ' / ' + files.length, 60000);
+      var key = sameKey(f.name), match = null;
+      for (var j = 0; j < tracks.length; j++) {
+        var t0 = tracks[j];
+        if (t0.subject === info.subject && (t0.course || '') === info.course && sameKey(t0.name) === key) { match = t0; break; }
+      }
+      return { f: f, info: info, match: match };
+    });
+    var dups = plan.filter(function (p) { return p.match; });
+    var doReplace = false;
+    if (dups.length) {
+      var names = dups.slice(0, 5).map(function (p) { return '・' + p.f.name; }).join('\n') + (dups.length > 5 ? '\n…ほか ' + (dups.length - 5) + ' 件' : '');
+      doReplace = confirm('次の ' + dups.length + ' 件は、もう取り込んであります。\n' + names +
+        '\n\n［OK］音声だけ差し替える（周回数・聴取時間・理解度はそのまま。続きの位置は最初に戻る）\n［キャンセル］この ' + dups.length + ' 件は取り込まない');
+    }
+    var added = 0, skipped = 0, replaced = 0;
+    for (var i = 0; i < plan.length; i++) {
+      var f = plan[i].f, info = plan[i].info;
+      if (plan[i].match) {
+        if (!doReplace) { skipped++; continue; }
+        toast('差し替え中 ' + (i + 1) + ' / ' + plan.length, 60000);
+        try { await replaceAudio(plan[i].match, f); replaced++; }
+        catch (e) { console.error(e); toast('「' + f.name + '」で止まりました。スマホの空き容量が足りないかもしれません', 6000); break; }
+        continue;
+      }
+      toast('取り込み中 ' + (i + 1) + ' / ' + plan.length, 60000);
       try {
         var buf = await readFile(f);
         var id = uid();
@@ -255,8 +276,34 @@
     if (gs.length === 1) { ui.subject = 'g:' + gs[0]; lsSet(K.ui, ui); }
     if (added) { syncState.lastPull = 0; scheduleSend(500); }
     renderAll();
-    toast(added + ' 件取り込みました' + (gs.length ? '（' + gs.join('・') + '）' : '') +
-      (skipped ? '　同じ名前の ' + skipped + ' 件は飛ばしました' : ''), 5000);
+    var msg = [];
+    if (added || (!replaced && !skipped)) msg.push(added + ' 件取り込みました' + (gs.length ? '（' + gs.join('・') + '）' : ''));
+    if (replaced) msg.push(replaced + ' 件の音声を差し替えました');
+    if (skipped) msg.push('同じ名前の ' + skipped + ' 件は取り込みませんでした');
+    toast(msg.join('　'), 5000);
+  }
+
+  // 録り直しのファイル名の「_2」「_3」と拡張子をのけて比べる
+  function sameKey(name) {
+    return String(name).replace(/\.[^.]+$/, '').replace(/_\d+$/, '').trim();
+  }
+
+  // 音声だけ入れ替える。名前（同期で照らし合わせる鍵）と記録はそのまま、長さは読み直し、続きの位置は最初に戻す
+  async function replaceAudio(t, file) {
+    if (cur && cur.id === t.id) stopPlayback();
+    var buf = await readFile(file);
+    await idbPut('audio', { id: t.id, type: file.type || 'audio/mpeg', data: buf });
+    buf = null;
+    t.size = file.size;
+    t.duration = 0;
+    t.lastPos = 0;
+    t.lapLec = 0;
+    t.replacedAt = Date.now();
+    markDirty(t);
+    await saveDirty();
+    var last = lsGet(K.last, null);
+    if (last && last.id === t.id) { last.pos = 0; lsSet(K.last, last); }
+    pushLog(t, 'replace', 0, 0);
   }
 
   async function deleteTracks(list) {
@@ -1222,6 +1269,23 @@
     });
     $('lapPlus').addEventListener('click', function () { adjustLap(1); });
     $('lapMinus').addEventListener('click', function () { adjustLap(-1); });
+    $('replaceInput').addEventListener('change', function () {
+      var file = this.files && this.files[0], t = cur, input = this;
+      if (!file || !t) { input.value = ''; return; }
+      if (!confirm('「' + titleOf(t) + '」の音声を「' + file.name + '」に差し替えます。\n周回数・聴取時間・理解度はそのまま、続きの位置は最初に戻ります。よろしいですか？')) { input.value = ''; return; }
+      toast('差し替え中…', 60000);
+      replaceAudio(t, file).then(function () {
+        input.value = '';
+        return loadTrack(t.id, 0, false);   // 新しい音声を最初から聞ける状態にしておく
+      }).then(function () {
+        renderAll();
+        toast('音声を差し替えました', 3000);
+      }, function (e) {
+        console.error(e);
+        input.value = '';
+        toast('差し替えできませんでした。スマホの空き容量が足りないかもしれません', 6000);
+      });
+    });
     $('btnDeleteTrack').addEventListener('click', function () {
       if (!cur) return;
       if (!confirm('「' + cur.name + '」の音声と記録を消します。元に戻せません。よろしいですか？')) return;
