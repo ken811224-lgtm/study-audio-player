@@ -5,7 +5,7 @@
 (function () {
   'use strict';
 
-  var APP_VERSION = '1.5.0';
+  var APP_VERSION = '1.5.1';
   var RATES = [1.0, 1.3, 1.5, 1.8, 2.0, 2.2];
   var STATUS_LIST = [
     { key: 'none', label: '未評価', mark: '' },
@@ -707,13 +707,20 @@
     var g = groupOf(cur);
     return tracks.filter(function (t) { return groupOf(t) === g; });
   }
+  // 続きの位置：最後の 5 秒より後まで聞いていたら頭から
+  function continuePos(t) {
+    var p = t.lastPos || 0;
+    if (t.duration && p >= t.duration - 5) return 0;
+    return p > SMART_REWIND ? p - SMART_REWIND : 0;
+  }
   function nextTrack(auto) {
     var list = orderedForNext();
     if (!list.length) return;
     var i = list.indexOf(cur);
     if (i >= 0 && i + 1 < list.length) {
       var n = list[i + 1];
-      loadTrack(n.id, auto ? 0 : (n.lastPos || 0), true);
+      // 続けて再生でも、途中まで聞いていた音声は止めた所（の少し前）から始める
+      loadTrack(n.id, continuePos(n), true);
     } else if (auto) {
       toast('「' + groupOf(cur) + '」の最後まで聞きました 🎉', 4000);
       setPlaybackState('paused');
