@@ -5,7 +5,7 @@
 (function () {
   'use strict';
 
-  var APP_VERSION = '1.4.0';
+  var APP_VERSION = '1.4.1';
   var RATES = [1.0, 1.3, 1.5, 1.8, 2.0, 2.2];
   var STATUS_LIST = [
     { key: 'none', label: '未評価', mark: '' },
@@ -128,7 +128,30 @@
     });
   }
   function idbPut(store, obj) { return idbReq(store, 'readwrite', function (s) { return s.put(obj); }); }
+  var curFromStore = false, curRetried = false;
   function idbGet(store, id) { return idbReq(store, 'readonly', function (s) { return s.get(id); }); }
+  // 音声の入れ物：使えるスマホでは Blob のまま（開くときにコピーが要らず軽い）、だめなら ArrayBuffer
+  var blobOK = null;
+  async function probeBlob() {
+    var c = lsGet('sap.blobok', null);
+    if (c && c.ua === navigator.userAgent) { blobOK = !!c.ok; return; }
+    var ok = false;
+    try {
+      await idbPut('audio', { id: '__probe', type: 'audio/mpeg', blob: new Blob([new Uint8Array([1, 2, 3, 4, 5])], { type: 'audio/mpeg' }) });
+      var r = await idbGet('audio', '__probe');
+      if (r && r.blob && r.blob.size === 5) {
+        var ab = await readFile(r.blob);
+        ok = ab.byteLength === 5 && new Uint8Array(ab)[4] === 5;
+      }
+      await idbDel('audio', '__probe');
+    } catch (e) { ok = false; }
+    blobOK = ok;
+    lsSet('sap.blobok', { ua: navigator.userAgent, ok: ok });
+  }
+  function audioRec(id, type, buf) {
+    type = type || 'audio/mpeg';
+    return blobOK ? { id: id, type: type, blob: new Blob([buf], { type: type }) } : { id: id, type: type, data: buf };
+  }
   function idbDel(store, id) { return idbReq(store, 'readwrite', function (s) { return s.delete(id); }); }
   function idbClear(store) { return idbReq(store, 'readwrite', function (s) { return s.clear(); }); }
   function idbAll(store) {
@@ -263,7 +286,7 @@
       try {
         var buf = await readFile(f);
         var id = uid();
-        await idbPut('audio', { id: id, type: f.type || 'audio/mpeg', data: buf });
+        await idbPut('audio', audioRec(id, f.type, buf));
         buf = null;
         var t = {
           id: id, subject: info.subject, course: info.course, title: info.title, name: f.name, no: 0, size: f.size, duration: 0,
@@ -430,7 +453,7 @@
   async function replaceAudio(t, file) {
     if (cur && cur.id === t.id) stopPlayback();
     var buf = await readFile(file);
-    await idbPut('audio', { id: t.id, type: file.type || 'audio/mpeg', data: buf });
+    await idbPut('audio', audioRec(t.id, file.type, buf));
     buf = null;
     t.size = file.size;
     t.duration = 0;
@@ -494,10 +517,18 @@
     flushSession('switch');
     var rec = await idbGet('audio', id);
     if (!rec) { toast('音声の中身が見つかりません。取り込み直してください', 5000); return; }
-    var blob = new Blob([rec.data], { type: rec.type || 'audio/mpeg' });
+    var type = rec.type || 'audio/mpeg';
+    var stored = !!rec.blob;            // Blob のまま入っていれば、コピーせずにそのまま使う
+    var blob = stored ? rec.blob : new Blob([rec.data], { type: type });
     rec = null;
     releaseUrl();                       // 前の曲の Blob URL を必ず解放
     curUrl = URL.createObjectURL(blob);
+    curFromStore = stored; curRetried = false;
+    // 古い形（ArrayBuffer）で入っていたものは、一度だけ Blob の形にしまい直す（次から軽く開ける）
+    if (!stored && blobOK) {
+      var keep = blob, kid = id;
+      setTimeout(function () { idbPut('audio', { id: kid, type: type, blob: keep }).catch(function (e) { console.warn(e); }); keep = null; }, 4000);
+    }
     blob = null;
     cur = t;
     pendingSeek = Math.max(0, startPos || 0);
@@ -619,7 +650,6 @@
     session.r += real; session.l += lecture;
     markDirty(cur);
     markSyncT(cur); markSyncD(k);
-    lsSet(K.daily, daily);
     if (Date.now() - lastSaveAt > 10000) { lastSaveAt = Date.now(); saveDirty(); saveLast(); }
     if (session.r >= LOG_EVERY_SEC) flushSession('listening');
   }
@@ -683,8 +713,20 @@
   var dailyBase = lsGet(K.dbase, {});              // ほかの端末の日別の合計
   var sdirty = lsGet(K.sdirty, { t: {}, d: {} });  // まだ送っていない変更（値は変更の番号）
   var sdSeq = Date.now();
-  function markSyncT(t) { sdirty.t[t.name] = ++sdSeq; lsSet(K.sdirty, sdirty); }
-  function markSyncD(k) { sdirty.d[k] = ++sdSeq; lsSet(K.sdirty, sdirty); }
+  function markSyncT(t) { sdirty.t[t.name] = ++sdSeq; persistSoon(); }
+  function markSyncD(k) { sdirty.d[k] = ++sdSeq; persistSoon(); }
+  // 日別の記録と「未同期の印」は、すぐには書かずに 5 秒ごとにまとめて保存する
+  // （再生中は 1 秒に何回も変わるので、そのたびに書くと古いスマホでは重くなる）
+  var persistTimer = null;
+  function persistSoon() {
+    if (persistTimer) return;
+    persistTimer = setTimeout(persistNow, 5000);
+  }
+  function persistNow() {
+    if (persistTimer) { clearTimeout(persistTimer); persistTimer = null; }
+    lsSet(K.daily, daily);
+    lsSet(K.sdirty, sdirty);
+  }
   function hasSyncDirty() { return Object.keys(sdirty.t).length > 0 || Object.keys(sdirty.d).length > 0; }
   function ownOf(t) {
     var b = t.base || { pc: 0, ls: 0, lc: 0 };
@@ -919,7 +961,7 @@
     accumulate();
     lastMedia = null;
     if (!audio.ended) flushSession('pause');
-    saveLast(); saveDirty();
+    persistNow(); saveLast(); saveDirty();
     setPlaybackState('paused');
     renderPlayer(); renderHero(); renderListMarks();
   });
@@ -932,13 +974,37 @@
     lastMedia = null;
     if (cur) { cur.lastPos = 0; cur.posAt = Date.now(); markDirty(cur); markSyncT(cur); }
     flushSession('ended');
-    saveLast(); saveDirty();
+    persistNow(); saveLast(); saveDirty();
     if (settings.autoNext) nextTrack(true);
     else { setPlaybackState('paused'); renderPlayer(); }
   });
   audio.addEventListener('error', function () {
-    if (cur && curUrl) toast('この音声は再生できませんでした（形式が合わないかもしれません）', 5000);
+    if (!cur || !curUrl) return;
+    if (curFromStore && !curRetried) { curRetried = true; retryAsBuffer(cur); return; }
+    toast('この音声は再生できませんでした（形式が合わないかもしれません）', 5000);
   });
+  // Blob のまま開けなかったスマホ向け：中身を読み出して作り直し、次からは ArrayBuffer の形で使う
+  async function retryAsBuffer(t) {
+    try {
+      var rec = await idbGet('audio', t.id);
+      var buf = await readFile(rec.blob);
+      var type = rec.type || 'audio/mpeg';
+      blobOK = false; lsSet('sap.blobok', { ua: navigator.userAgent, ok: false });
+      await idbPut('audio', { id: t.id, type: type, data: buf });
+      var pos = t.lastPos || 0, wasPlaying = true;
+      releaseUrl();
+      curUrl = URL.createObjectURL(new Blob([buf], { type: type }));
+      curFromStore = false;
+      buf = null;
+      pendingSeek = pos;
+      audio.src = curUrl;
+      applyRate();
+      if (wasPlaying) playAudio();
+    } catch (e) {
+      console.error(e);
+      toast('音声の中身が読めませんでした。Drive から取り込み直してください', 6000);
+    }
+  }
 
   /* ---------- 画面 ---------- */
   function statusLabel(k) {
@@ -1496,10 +1562,10 @@
 
     window.addEventListener('online', function () { sendQueue(); });
     document.addEventListener('visibilitychange', function () {
-      if (document.visibilityState === 'hidden') { accumulate(); saveLast(); saveDirty(); }
+      if (document.visibilityState === 'hidden') { accumulate(); persistNow(); saveLast(); saveDirty(); }
       else { renderHero(); renderStats(); sendQueue(); }
     });
-    window.addEventListener('pagehide', function () { accumulate(); flushSession('close'); saveLast(); saveDirty(); });
+    window.addEventListener('pagehide', function () { accumulate(); flushSession('close'); persistNow(); saveLast(); saveDirty(); });
   }
   function playId(id) {
     if (!id) return;
@@ -1563,6 +1629,7 @@
       db = await openDB();
       tracks = await idbAll('tracks');
       await migrateNames();
+      await probeBlob();
       sortTracks();
     } catch (e) {
       console.error(e);

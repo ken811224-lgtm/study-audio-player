@@ -250,3 +250,6 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 18px;
 .drv-sub.new { color: #7bd88f; }
 .drv-sub.newer { color: #f5c060; }
 .drv-row.have .drv-name { color: var(--sub); }
+
+/* タップしてから反応するまでの待ち（ダブルタップで拡大するかの見張り）をなくす */
+button, a, label, input, select, .track, .tile, .dc, .hero { -ms-touch-action: manipulation; touch-action: manipulation; }
