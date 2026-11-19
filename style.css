@@ -19,7 +19,7 @@
 }
 
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-html, body { margin: 0; padding: 0; }
+html, body { margin: 0; padding: 0; overflow-x: hidden; max-width: 100%; }   /* 横へはみ出さない */
 body {
   background: var(--bg);
   color: var(--text);
@@ -106,10 +106,12 @@ main { padding: 12px 12px 210px; max-width: 720px; margin: 0 auto; }
 .input, .select {
   background: var(--bg2); border: 1px solid var(--line); border-radius: 10px; padding: 9px 10px; width: 100%;
   -webkit-appearance: none; appearance: none;
+  font-size: 16px;   /* 16px より小さいと、iPhone は押したときに画面を拡大して戻さない（横にはみ出して見える） */
 }
 .select { padding-right: 6px; }
-.filters { display: -webkit-box; display: -webkit-flex; display: flex; margin-bottom: 6px; }
-.filters .select { -webkit-flex: 1; flex: 1; margin-right: 6px; min-width: 0; font-size: 13px; padding: 7px 6px; }
+.filters { display: -webkit-box; display: -webkit-flex; display: flex; -webkit-flex-wrap: wrap; flex-wrap: wrap; margin-bottom: 6px; }
+.filters .select { -webkit-flex: 1; flex: 1; margin-right: 6px; min-width: 0; font-size: 16px; padding: 7px 6px; }
+.filters #fSubject { -webkit-flex: 0 0 100%; flex: 0 0 100%; margin-right: 0; margin-bottom: 6px; }   /* 科目は 1 行使う */
 .filters .select:last-child { margin-right: 0; }
 .btn {
   display: inline-block; background: var(--bg3); border: 1px solid var(--line); border-radius: 10px;
