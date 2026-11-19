@@ -5,7 +5,7 @@
 (function () {
   'use strict';
 
-  var APP_VERSION = '1.3.0';
+  var APP_VERSION = '1.3.1';
   var RATES = [1.0, 1.3, 1.5, 1.8, 2.0, 2.2];
   var STATUS_LIST = [
     { key: 'none', label: '未評価', mark: '' },
@@ -216,8 +216,12 @@
       return /^audio\//.test(f.type) || /\.(mp3|m4a|aac|wav|ogg)$/i.test(f.name);
     });
     files.sort(function (a, b) { return natcmp(a.name, b.name); });
-    if (!files.length) { toast('音声ファイルが選ばれていません'); return; }
-    if (navigator.storage && navigator.storage.persist) { try { await navigator.storage.persist(); } catch (e) { /* 無視 */ } }
+    if (!files.length) {
+      var nm = [].slice.call(fileList).map(function (f) { return f.name; }).join('、');
+      toast('音声ファイルではないようです：' + nm, 6000); return;
+    }
+    // 消されにくくするお願い。古い iPhone では返事が来ないことがあるので待たない
+    if (navigator.storage && navigator.storage.persist) { try { navigator.storage.persist().catch(function () {}); } catch (e) { /* 無視 */ } }
     // もう取り込んである講義（同じ科目・コースで、名前が同じ。録り直しの「_2」も同じとみなす）
     var plan = files.map(function (f) {
       var pn = parseName(f.name);
@@ -264,7 +268,7 @@
         added++;
       } catch (e) {
         console.error(e);
-        toast('「' + f.name + '」で止まりました。スマホの空き容量が足りないかもしれません', 6000);
+        toast('「' + f.name + '」で止まりました（' + ((e && e.name) || e) + '）。スマホの空き容量が足りないかもしれません', 8000);
         break;
       }
     }
@@ -1254,10 +1258,22 @@
     $('fSubject').addEventListener('change', function () { ui.subject = this.value; lsSet(K.ui, ui); renderList(); renderTiles(); });
     $('fView').addEventListener('change', function () { ui.view = this.value; lsSet(K.ui, ui); renderList(); });
     $('fSort').addEventListener('change', function () { ui.sort = this.value; lsSet(K.ui, ui); renderList(); });
+    // 選んだファイルはすぐ手元の配列に移し、入れ物は空にする
+    // （失敗や途中で止まっても、次に同じファイルを選べば必ず反応するように）
+    var importing = false;
+    $('fileInput').addEventListener('click', function () { this.value = ''; });
     $('fileInput').addEventListener('change', function () {
-      var files = this.files;
+      var files = [].slice.call(this.files || []);
+      this.value = '';
+      if (!files.length) return;
+      if (importing) { toast('いま取り込み中です。終わってからもう一度選んでください', 4000); return; }
+      importing = true;
+      toast(files.length + ' 件を受け取りました。読み込んでいます…', 60000);
       var subject = $('importSubject').value;
-      importFiles(files, subject).then(function () { $('fileInput').value = ''; });
+      importFiles(files, subject).catch(function (e) {
+        console.error(e);
+        toast('取り込みで止まりました：' + ((e && (e.name + ' ' + (e.message || ''))) || e), 8000);
+      }).then(function () { importing = false; });
     });
 
     $('statusRow').addEventListener('click', function (e) {
