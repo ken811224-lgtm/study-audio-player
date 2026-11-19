@@ -253,3 +253,5 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 18px;
 
 /* タップしてから反応するまでの待ち（ダブルタップで拡大するかの見張り）をなくす */
 button, a, label, input, select, .track, .tile, .dc, .hero { -ms-touch-action: manipulation; touch-action: manipulation; }
+
+.ver-top { font-size: 11px; font-weight: normal; color: var(--sub); margin-left: 4px; }

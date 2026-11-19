@@ -5,7 +5,7 @@
 (function () {
   'use strict';
 
-  var APP_VERSION = '1.4.1';
+  var APP_VERSION = '1.4.2';
   var RATES = [1.0, 1.3, 1.5, 1.8, 2.0, 2.2];
   var STATUS_LIST = [
     { key: 'none', label: '未評価', mark: '' },
@@ -964,6 +964,7 @@
     persistNow(); saveLast(); saveDirty();
     setPlaybackState('paused');
     renderPlayer(); renderHero(); renderListMarks();
+    if (wantReload) setTimeout(reloadForUpdate, 300);
   });
   audio.addEventListener('ratechange', function () {
     if (Math.abs(audio.playbackRate - rate) > 0.01 && cur) audio.playbackRate = rate;
@@ -1563,7 +1564,7 @@
     window.addEventListener('online', function () { sendQueue(); });
     document.addEventListener('visibilitychange', function () {
       if (document.visibilityState === 'hidden') { accumulate(); persistNow(); saveLast(); saveDirty(); }
-      else { renderHero(); renderStats(); sendQueue(); }
+      else { renderHero(); renderStats(); sendQueue(); checkUpdate(); }
     });
     window.addEventListener('pagehide', function () { accumulate(); flushSession('close'); persistNow(); saveLast(); saveDirty(); });
   }
@@ -1621,8 +1622,26 @@
     await idbReq('tracks', 'readwrite', function (s) { changed.forEach(function (t) { s.put(t); }); return null; });
   }
 
+  /* ---------- 新しい版への入れかえ ---------- */
+  // iPhone のホーム画面のアプリは、閉じても裏で生きていて開き直さないことが多い。
+  // そこで、開いたとき・画面に戻ったときに公開先へ新しい版を聞きに行く
+  var swReg = null, wantReload = false, reloading = false, lastCheck = 0;
+  function checkUpdate() {
+    if (!swReg || navigator.onLine === false) return;
+    if (Date.now() - lastCheck < 30000) return;
+    lastCheck = Date.now();
+    try { swReg.update().catch(function () { /* 圏外など */ }); } catch (e) { /* 無視 */ }
+  }
+  function reloadForUpdate() {
+    if (reloading) return;
+    reloading = true;
+    try { accumulate(); persistNow(); saveLast(); } catch (e) { /* 無視 */ }
+    Promise.resolve(saveDirty()).then(function () { location.reload(); }, function () { location.reload(); });
+  }
+
   /* ---------- 起動 ---------- */
   async function start() {
+    $('verTop').textContent = 'v' + APP_VERSION;
     bind();
     setupMediaSession();
     try {
@@ -1641,7 +1660,21 @@
     // 日付が変わったら表示を直す
     setInterval(function () { tickHero(true); }, 60000);
     if ('serviceWorker' in navigator) {
-      navigator.serviceWorker.register('sw.js').catch(function (e) { console.warn('SW', e); });
+      // 新しい版が届いて入れかわったら、自動で開き直す（再生中なら止めたときに）
+      var hadCtrl = !!navigator.serviceWorker.controller;
+      navigator.serviceWorker.addEventListener('controllerchange', function () {
+        if (!hadCtrl) { hadCtrl = true; return; }   // はじめて開いたときは開き直さない
+        if (cur && curUrl && !audio.paused) {
+          wantReload = true;
+          toast('新しい版が届きました。再生を止めたときに入れかわります', 5000);
+          return;
+        }
+        reloadForUpdate();
+      });
+      navigator.serviceWorker.register('sw.js').then(function (reg) {
+        swReg = reg;
+        checkUpdate();
+      }).catch(function (e) { console.warn('SW', e); });
     }
   }
 

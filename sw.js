@@ -2,7 +2,7 @@
  * 音声そのものは IndexedDB に入っているので、ここではしまわない
  * 版を上げたら CACHE の名前も変える（変えると新しい部品に入れかわる）
  */
-var CACHE = 'sap-v1.4.1';
+var CACHE = 'sap-v1.4.2';
 var FILES = [
   './',
   'index.html',
@@ -15,7 +15,10 @@ var FILES = [
 ];
 
 self.addEventListener('install', function (e) {
-  e.waitUntil(caches.open(CACHE).then(function (c) { return c.addAll(FILES); }).then(function () { return self.skipWaiting(); }));
+  // cache: 'reload' … ブラウザの一時保存（古い版のこともある）を使わず、公開先から取り直す
+  e.waitUntil(caches.open(CACHE).then(function (c) {
+    return c.addAll(FILES.map(function (u) { return new Request(u, { cache: 'reload' }); }));
+  }).then(function () { return self.skipWaiting(); }));
 });
 
 self.addEventListener('activate', function (e) {
