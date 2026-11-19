@@ -5,7 +5,7 @@
 (function () {
   'use strict';
 
-  var APP_VERSION = '1.6.0';
+  var APP_VERSION = '1.7.0';
   var RATES = [1.0, 1.3, 1.5, 1.8, 2.0, 2.2];
   var STATUS_LIST = [
     { key: 'none', label: '未評価', mark: '' },
@@ -516,20 +516,65 @@
     $('editGroupLbl').textContent = '「' + editTarget.group + '」の ' + n + ' 本全部';
     var radios = document.getElementsByName('editScope');
     radios[0].checked = !!t; radios[1].checked = !t;
-    $('eSubject').value = base.subject;
-    $('eCourse').value = base.course || '';
     $('eTitle').value = t ? titleOf(t) : '';
-    fillEditLists();
+    $('eSubject').value = ''; $('eCourse').value = '';
+    fillSubjectSel(base.subject);
+    fillCourseSel(base.course || '');
     syncEditScope();
     $('editModal').classList.remove('hidden');
   }
-  function fillEditLists() {
-    var dl = '';
-    subjects().forEach(function (s) { dl += '<option value="' + esc(s) + '">'; });
-    $('editSubjectList').innerHTML = dl;
-    var cl = '';
-    coursesOf($('eSubject').value.trim()).forEach(function (c) { if (c) cl += '<option value="' + esc(c) + '">'; });
-    $('editCourseList').innerHTML = cl;
+  var NEW_OPT = '__new';
+  function fillSubjectSel(val) {
+    var h = '';
+    nameSubjects().forEach(function (s) { h += '<option value="' + esc(s) + '">' + esc(s) + '</option>'; });
+    h += '<option value="' + NEW_OPT + '">＋ 新しい科目を入れる…</option>';
+    $('eSubjectSel').innerHTML = h;
+    $('eSubjectSel').value = val;
+    syncNewInputs();
+  }
+  function fillCourseSel(val) {
+    var s = $('eSubjectSel').value, h = '<option value="">（コースなし）</option>';
+    if (s !== NEW_OPT) nameCourses(s).forEach(function (c) { if (c) h += '<option value="' + esc(c) + '">' + esc(c) + '</option>'; });
+    h += '<option value="' + NEW_OPT + '">＋ 新しいコースを入れる…</option>';
+    $('eCourseSel').innerHTML = h;
+    $('eCourseSel').value = val;
+    if ($('eCourseSel').value !== val) $('eCourseSel').value = '';
+    syncNewInputs();
+  }
+  function syncNewInputs() {
+    $('eSubject').classList.toggle('hidden', $('eSubjectSel').value !== NEW_OPT);
+    $('eCourse').classList.toggle('hidden', $('eCourseSel').value !== NEW_OPT);
+  }
+
+  /* ---------- 分類の候補（一度使った名前は音声がなくなっても残す） ---------- */
+  var names = lsGet('sap.names', {});   // { 科目: [コース, …] }（'' はコースなし）
+  function addName(s, c) {
+    s = String(s || '').trim(); c = String(c || '').trim();
+    if (!s) return false;
+    var list = names[s] || (names[s] = []);
+    if (list.indexOf(c) >= 0) return false;
+    list.push(c);
+    return true;
+  }
+  function rememberNames() {
+    var ch = false;
+    tracks.forEach(function (t) { if (addName(t.subject, t.course || '')) ch = true; });
+    if (ch) lsSet('sap.names', names);
+  }
+  function nameSubjects() { return Object.keys(names).sort(natcmp); }
+  function nameCourses(s) { return (names[s] || []).slice().sort(natcmp); }
+  function renderNames() {
+    var h = '', n = 0;
+    nameSubjects().forEach(function (s) {
+      nameCourses(s).forEach(function (c) {
+        var g = s + (c ? '＜' + c + '＞' : '');
+        var used = tracks.some(function (t) { return t.subject === s && (t.course || '') === c; });
+        if (used) return;
+        n++;
+        h += '<option value="' + esc(s + '\t' + c) + '">' + esc(g) + '</option>';
+      });
+    });
+    $('nameDel').innerHTML = n ? h : '<option value="">（音声の入っていない候補はありません）</option>';
   }
   function editScope() {
     var r = document.getElementsByName('editScope');
@@ -538,8 +583,12 @@
   function syncEditScope() { $('eTitleRow').classList.toggle('hidden', editScope() !== 'one'); }
   async function saveEdit() {
     if (!editTarget) return;
-    var subject = $('eSubject').value.trim(), course = $('eCourse').value.trim(), title = $('eTitle').value.trim();
+    var ss = $('eSubjectSel').value, cs = $('eCourseSel').value;
+    var subject = (ss === NEW_OPT ? $('eSubject').value : ss).trim();
+    var course = (cs === NEW_OPT ? $('eCourse').value : cs).trim();
+    var title = $('eTitle').value.trim();
     if (!subject) { toast('科目を入れてください'); return; }
+    if (cs === NEW_OPT && !course) { toast('新しいコースの名前を入れてください'); return; }
     if (/[＜＞]/.test(subject + course)) { toast('＜ ＞ は使えません'); return; }
     var list = editScope() === 'one' ? [editTarget.one]
       : tracks.filter(function (t) { return groupOf(t) === editTarget.group; });
@@ -1311,6 +1360,7 @@
   }
 
   function renderFilters() {
+    rememberNames();
     var subs = subjects();
     var vals = [''];
     var opt = '<option value="">すべての科目</option>';
@@ -1331,8 +1381,9 @@
     $('fView').value = ui.view;
     $('fSort').value = ui.sort;
     var dl = '';
-    subs.forEach(function (s) { dl += '<option value="' + esc(s) + '">'; });
+    nameSubjects().forEach(function (s) { dl += '<option value="' + esc(s) + '">'; });
     $('subjectList').innerHTML = dl;
+    renderNames();
     if (!$('importSubject').value) $('importSubject').value = settings.subject || '';
     var del = '';
     groups().forEach(function (g) { del += '<option value="' + esc(g) + '">' + esc(g) + '</option>'; });
@@ -1738,7 +1789,30 @@
     $('btnCloseEdit').addEventListener('click', function () { $('editModal').classList.add('hidden'); });
     $('btnEditCancel').addEventListener('click', function () { $('editModal').classList.add('hidden'); });
     $('btnEditSave').addEventListener('click', function () { saveEdit().catch(function (e) { console.error(e); toast('変えられませんでした：' + errMsg(e), 5000); }); });
-    $('eSubject').addEventListener('input', fillEditLists);
+    $('eSubjectSel').addEventListener('change', function () { fillCourseSel(''); if (this.value === NEW_OPT) $('eSubject').focus(); });
+    $('eCourseSel').addEventListener('change', function () { syncNewInputs(); if (this.value === NEW_OPT) $('eCourse').focus(); });
+    $('btnNameAdd').addEventListener('click', function () {
+      var s = $('nSubject').value.trim(), c = $('nCourse').value.trim();
+      if (!s) { toast('科目を入れてください'); return; }
+      if (/[＜＞]/.test(s + c)) { toast('＜ ＞ は使えません'); return; }
+      if (!addName(s, c)) { toast('もう候補にあります'); return; }
+      lsSet('sap.names', names);
+      $('nSubject').value = ''; $('nCourse').value = '';
+      renderFilters();
+      toast('候補に足しました（' + s + (c ? '＜' + c + '＞' : '') + '）');
+    });
+    $('btnNameDel').addEventListener('click', function () {
+      var v = $('nameDel').value;
+      if (!v) return;
+      var p = v.split('\t'), s = p[0], c = p[1] || '';
+      var list = names[s] || [];
+      var i = list.indexOf(c);
+      if (i >= 0) list.splice(i, 1);
+      if (!list.length) delete names[s];
+      lsSet('sap.names', names);
+      renderFilters();
+      toast('候補から消しました（' + s + (c ? '＜' + c + '＞' : '') + '）');
+    });
     [].forEach.call(document.getElementsByName('editScope'), function (r) { r.addEventListener('change', syncEditScope); });
     $('btnOffTrack').addEventListener('click', function () {
       if (!cur) return;
@@ -1811,7 +1885,8 @@
       stopPlayback();
       Promise.all([idbClear('audio'), idbClear('tracks')]).then(function () {
         tracks = []; byId = {}; daily = {}; queue = []; dailyBase = {}; sdirty = { t: {}, d: {} };
-        [K.daily, K.queue, K.last, K.dbase, K.sdirty].forEach(function (k) { localStorage.removeItem(k); });
+        names = {};
+        [K.daily, K.queue, K.last, K.dbase, K.sdirty, 'sap.names'].forEach(function (k) { localStorage.removeItem(k); });
         deviceId = 'd' + uid(); lsSet(K.device, deviceId);
         syncState = { lastOk: 0, lastErr: '' }; lsSet(K.sync, syncState);
         renderAll(); renderStorage(); toast('すべて消しました');
