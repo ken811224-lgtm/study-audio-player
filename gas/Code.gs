@@ -33,7 +33,7 @@ var LOG_HEAD = ['ログID', '日時', '端末', '科目', 'コース', '番号',
 var MASTER_HEAD = ['科目', 'コース', '番号', '題名', 'ファイル名', '周回数', '累積実時間(分)', '累積講義時間(分)', '最終聴取日', '理解度', '聞いた端末', '更新日時'];
 var DAILY_HEAD = ['日付', '実聴取(分)', '講義時間(分)', '更新日時'];
 // 同期_単元 の列（時刻はミリ秒の数字のまま）
-var SYNC_T_HEAD = ['端末ID', '端末名', 'ファイル名', '科目', 'コース', '番号', '題名', '周回', '実聴取秒', '講義秒', '最終聴取', '理解度', '理解度の時刻', '停止位置', '停止位置の時刻', '更新日時'];
+var SYNC_T_HEAD = ['端末ID', '端末名', 'ファイル名', '科目', 'コース', '番号', '題名', '周回', '実聴取秒', '講義秒', '最終聴取', '理解度', '理解度の時刻', '停止位置', '停止位置の時刻', '更新日時', '分類を変えた時刻'];
 var SYNC_D_HEAD = ['端末ID', '端末名', '日付', '実秒', '講義秒', '更新日時'];
 var EVENT_NAME = {
   pause: '一時停止', ended: '最後まで', complete: '周回 +1', 'switch': '曲を変えた', stop: '停止',
@@ -69,7 +69,8 @@ function doPost(e) {
       if (body.pull) {
         out.tracks = st.rows.map(function (r) {
           return { d: r[0], dn: r[1], f: r[2], pc: num_(r[7]), ls: num_(r[8]), lc: num_(r[9]), lp: num_(r[10]),
-            st: r[11] || 'none', sa: num_(r[12]), pos: num_(r[13]), pa: num_(r[14]) };
+            st: r[11] || 'none', sa: num_(r[12]), pos: num_(r[13]), pa: num_(r[14]),
+            s: r[3], c: r[4], t: r[6], ca: num_(r[16]) };
         });
         out.daily = sd.rows.map(function (r) { return { d: r[0], k: String(r[2]), r: num_(r[3]), l: num_(r[4]) }; });
       }
@@ -115,6 +116,9 @@ function sheet_(ss, name, head) {
     sh = ss.insertSheet(name);
     sh.getRange(1, 1, 1, head.length).setValues([head]).setFontWeight('bold').setBackground('#e8f5e9');
     sh.setFrozenRows(1);
+  } else if (sh.getLastColumn() < head.length) {
+    // 列が増えた版：見出しを足す
+    sh.getRange(1, 1, 1, head.length).setValues([head]).setFontWeight('bold').setBackground('#e8f5e9');
   }
   return sh;
 }
@@ -171,7 +175,7 @@ function upsertSyncTracks_(ss, device, deviceName, list) {
   list.forEach(function (t) {
     if (!t || !t.f) return;
     var row = [device, deviceName, t.f, t.s || '', t.c || '', t.no || '', t.t || '', num_(t.pc), Math.round(num_(t.ls)), Math.round(num_(t.lc)),
-      num_(t.lp), t.st || 'none', num_(t.sa), Math.round(num_(t.pos)), num_(t.pa), now];
+      num_(t.lp), t.st || 'none', num_(t.sa), Math.round(num_(t.pos)), num_(t.pa), now, num_(t.ca)];
     var k = device + '\t' + t.f;
     if (index[k] !== undefined) rows[index[k]] = row;
     else { index[k] = rows.length; rows.push(row); }
@@ -208,7 +212,9 @@ function rebuildMaster_(ss, syncRows) {
   var by = {};
   syncRows.forEach(function (r) {
     var f = r[2];
-    var m = by[f] || (by[f] = { s: r[3], c: r[4], no: r[5], t: r[6], pc: 0, ls: 0, lc: 0, lp: 0, st: 'none', sa: -1, dev: {} });
+    var m = by[f] || (by[f] = { s: r[3], c: r[4], no: r[5], t: r[6], ca: -1, pc: 0, ls: 0, lc: 0, lp: 0, st: 'none', sa: -1, dev: {} });
+    // 分類は、いちばん新しく変えた端末のものを使う
+    if (num_(r[16]) > m.ca) { m.ca = num_(r[16]); m.s = r[3]; m.c = r[4]; m.no = r[5]; m.t = r[6]; }
     m.pc += num_(r[7]); m.ls += num_(r[8]); m.lc += num_(r[9]);
     if (num_(r[10]) > m.lp) m.lp = num_(r[10]);
     if (num_(r[12]) > m.sa) { m.sa = num_(r[12]); m.st = r[11] || 'none'; }

@@ -90,7 +90,8 @@ main { padding: 12px 12px 210px; max-width: 720px; margin: 0 auto; }
 .st-btn.on.st-again { border-color: #ffb648; background: #3d2f17; }
 .st-btn.on.st-text { border-color: var(--danger); background: #3d1d1d; }
 .now-foot { display: -webkit-box; display: -webkit-flex; display: flex; -webkit-align-items: center; align-items: center; margin-top: 4px; }
-.now-foot .hint { -webkit-flex: 1; flex: 1; }
+.now-foot { -webkit-flex-wrap: wrap; flex-wrap: wrap; }
+.now-foot .hint { -webkit-flex: 1 1 100%; flex: 1 1 100%; }
 .link-btn { background: transparent; border: 0; color: var(--sub); text-decoration: underline; font-size: 12px; padding: 4px; }
 .link-btn.danger { color: var(--danger); }
 .hint { color: var(--sub); font-size: 12px; }
@@ -264,3 +265,7 @@ button, a, label, input, select, .track, .tile, .dc, .hero { -ms-touch-action: m
 .tile.off { opacity: .45; }
 .gauge-bar.warn { background: #f5a524; }
 .gauge-bar.full { background: #ef5350; }
+
+/* 分類を変える */
+.edit-scope { display: flex; flex-wrap: wrap; gap: 4px 16px; margin: 8px 0 4px; }
+.edit-scope .check { margin: 0; }

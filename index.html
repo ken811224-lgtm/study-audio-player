@@ -55,6 +55,7 @@
     <div class="status-row" id="statusRow"></div>
     <div class="now-foot">
       <span id="nowLapHint" class="hint"></span>
+      <button class="link-btn" id="btnEditTrack" type="button">分類を変える</button>
       <label class="link-btn file-btn">音声を差し替える
         <input id="replaceInput" type="file" accept="audio/*,.mp3,.m4a">
       </label>
@@ -191,6 +192,7 @@
     <div class="hint" style="margin-bottom:8px">古い iPhone（iOS 15 まで）は 1GB くらいで入らなくなります。聞き終わったコースは「音声だけ外す」で空けてください（周回数などの記録は残り、☁ の講義を押せば Drive から取り直して再生します）。</div>
     <select id="delSubject" class="select"></select>
     <div class="btn-row">
+      <button class="btn" id="btnEditGroup" type="button">このコースの分類を変える</button>
       <button class="btn" id="btnOffSubject" type="button">このコースの音声だけ外す</button>
       <button class="btn" id="btnGetSubject" type="button">このコースを Drive から全部取る</button>
       <button class="btn danger" id="btnDelSubject" type="button">このコースを記録ごと消す</button>
@@ -221,6 +223,37 @@
       <button class="btn" id="btnDriveReload" type="button">一覧を読み直す</button>
     </div>
     <div class="hint">Wi-Fi のときがおすすめです（1 本 10〜30MB）。取り込みが終わるまで画面を消さないでください。</div>
+  </div>
+</div>
+
+<!-- 分類を変える -->
+<div id="editModal" class="modal hidden">
+  <div class="modal-body">
+    <div class="modal-head">
+      <h2>分類を変える</h2>
+      <button class="icon-btn" id="btnCloseEdit" type="button" aria-label="閉じる">✕</button>
+    </div>
+    <div class="hint" id="editInfo"></div>
+    <div id="editScopeRow" class="edit-scope">
+      <label class="check"><input type="radio" name="editScope" value="one" checked> この音声だけ</label>
+      <label class="check"><input type="radio" name="editScope" value="group"> <span id="editGroupLbl">このコース全部</span></label>
+    </div>
+    <label class="field">科目
+      <input id="eSubject" class="input" list="editSubjectList" autocomplete="off" placeholder="例：不動産登記法">
+    </label>
+    <datalist id="editSubjectList"></datalist>
+    <label class="field">コース（なければ空のまま）
+      <input id="eCourse" class="input" list="editCourseList" autocomplete="off" placeholder="例：基礎">
+    </label>
+    <datalist id="editCourseList"></datalist>
+    <label class="field" id="eTitleRow">題名
+      <input id="eTitle" class="input" autocomplete="off">
+    </label>
+    <div class="hint">番号は題名の頭の数字から自動で付け直します（数字がないときはファイル名の順）。周回数・聴取時間・理解度・続きの位置はそのままです。同期を使っていれば、ほかの端末にもこの分類が届きます。</div>
+    <div class="btn-row">
+      <button class="btn primary" id="btnEditSave" type="button">変える</button>
+      <button class="btn" id="btnEditCancel" type="button">やめる</button>
+    </div>
   </div>
 </div>
 

@@ -5,7 +5,7 @@
 (function () {
   'use strict';
 
-  var APP_VERSION = '1.5.1';
+  var APP_VERSION = '1.6.0';
   var RATES = [1.0, 1.3, 1.5, 1.8, 2.0, 2.2];
   var STATUS_LIST = [
     { key: 'none', label: '未評価', mark: '' },
@@ -237,11 +237,13 @@
   function infoOf(name, subject) {
     return parseName(name) || { subject: (subject || '').trim() || '未分類', course: '', title: String(name).replace(/\.[^.]+$/, '') };
   }
+  // 取り込んだときの分類（あとで分類を変えても、Drive やファイルとの照らし合わせはこちらで）
+  function srcOf(t) { return t.src || { subject: t.subject, course: t.course || '' }; }
   function findSame(info, name) {
     var key = sameKey(name);
     for (var j = 0; j < tracks.length; j++) {
-      var t0 = tracks[j];
-      if (t0.subject === info.subject && (t0.course || '') === info.course && sameKey(t0.name) === key) return t0;
+      var t0 = tracks[j], s0 = srcOf(t0);
+      if (s0.subject === info.subject && (s0.course || '') === info.course && sameKey(t0.name) === key) return t0;
     }
     return null;
   }
@@ -473,6 +475,82 @@
     pushLog(t, 'replace', 0, 0);
   }
 
+  /* ---------- 分類を変える（科目・コース・題名） ---------- */
+  // 変えたものに印（cat＝変えた時刻）を付けて同期で配る。番号は前と後のコースで付け直す
+  function setClass(t, subject, course, title, at) {
+    if (!t.src) t.src = { subject: t.subject, course: t.course || '' };
+    t.subject = subject; t.course = course;
+    if (title !== null && title !== undefined) t.title = title;
+    t.cat = at;
+  }
+  async function applyClassChange(list, subject, course, title) {
+    var gs = {}, at = Date.now(), wasFilter = ui.subject;
+    var oldG = list.length ? groupOf(list[0]) : '';
+    list.forEach(function (t) {
+      gs[groupOf(t)] = 1;
+      setClass(t, subject, course, list.length === 1 ? title : null, at);
+      gs[groupOf(t)] = 1;
+      markSyncT(t);
+    });
+    var all = [];
+    Object.keys(gs).forEach(function (g) { all = all.concat(renumber(g)); });
+    list.forEach(function (t) { if (all.indexOf(t) < 0) all.push(t); });
+    await idbReq('tracks', 'readwrite', function (s) { all.forEach(function (t) { s.put(t); }); return null; });
+    sortTracks();
+    // 絞り込みで見ていたコースを丸ごと変えたら、新しい名前のほうを見る
+    if (wasFilter === 'g:' + oldG && !tracks.some(function (t) { return groupOf(t) === oldG; })) {
+      ui.subject = 'g:' + groupOf(list[0]); lsSet(K.ui, ui);
+    }
+    if (cur && list.indexOf(cur) >= 0) updateMediaMeta();
+    scheduleSend(1500);
+    renderAll();
+  }
+  var editTarget = null;   // { one: 単元, group: '科目＜コース＞' }
+  function openEdit(t, group) {
+    editTarget = { one: t, group: group || (t ? groupOf(t) : '') };
+    var base = t || tracks.filter(function (x) { return groupOf(x) === editTarget.group; })[0];
+    if (!base) return;
+    var n = tracks.filter(function (x) { return groupOf(x) === editTarget.group; }).length;
+    $('editInfo').textContent = t ? '「' + titleOf(t) + '」（' + t.name + '）' : '「' + editTarget.group + '」の ' + n + ' 本';
+    $('editScopeRow').classList.toggle('hidden', !t || n < 2);
+    $('editGroupLbl').textContent = '「' + editTarget.group + '」の ' + n + ' 本全部';
+    var radios = document.getElementsByName('editScope');
+    radios[0].checked = !!t; radios[1].checked = !t;
+    $('eSubject').value = base.subject;
+    $('eCourse').value = base.course || '';
+    $('eTitle').value = t ? titleOf(t) : '';
+    fillEditLists();
+    syncEditScope();
+    $('editModal').classList.remove('hidden');
+  }
+  function fillEditLists() {
+    var dl = '';
+    subjects().forEach(function (s) { dl += '<option value="' + esc(s) + '">'; });
+    $('editSubjectList').innerHTML = dl;
+    var cl = '';
+    coursesOf($('eSubject').value.trim()).forEach(function (c) { if (c) cl += '<option value="' + esc(c) + '">'; });
+    $('editCourseList').innerHTML = cl;
+  }
+  function editScope() {
+    var r = document.getElementsByName('editScope');
+    return editTarget && editTarget.one && r[0].checked ? 'one' : 'group';
+  }
+  function syncEditScope() { $('eTitleRow').classList.toggle('hidden', editScope() !== 'one'); }
+  async function saveEdit() {
+    if (!editTarget) return;
+    var subject = $('eSubject').value.trim(), course = $('eCourse').value.trim(), title = $('eTitle').value.trim();
+    if (!subject) { toast('科目を入れてください'); return; }
+    if (/[＜＞]/.test(subject + course)) { toast('＜ ＞ は使えません'); return; }
+    var list = editScope() === 'one' ? [editTarget.one]
+      : tracks.filter(function (t) { return groupOf(t) === editTarget.group; });
+    if (!list.length) return;
+    if (editScope() === 'one' && !title) title = list[0].name.replace(/\.[^.]+$/, '');
+    $('editModal').classList.add('hidden');
+    await applyClassChange(list, subject, course, title);
+    toast(list.length === 1 ? '分類を変えました（' + groupOf(list[0]) + '）' : list.length + ' 本の分類を変えました（' + groupOf(list[0]) + '）', 3500);
+    editTarget = null;
+  }
+
   async function deleteTracks(list) {
     for (var i = 0; i < list.length; i++) {
       var t = list[i];
@@ -524,8 +602,8 @@
     var key = sameKey(t.name);
     for (i = 0; i < list.length; i++) {
       f = list[i];
-      var fi = infoOf(f.name, settings.subject);
-      if (fi.subject === t.subject && (fi.course || '') === (t.course || '') && sameKey(f.name) === key) return f;
+      var fi = infoOf(f.name, settings.subject), st = srcOf(t);
+      if (fi.subject === st.subject && (fi.course || '') === (st.course || '') && sameKey(f.name) === key) return f;
     }
     return null;
   }
@@ -859,7 +937,7 @@
       if (!t) return;
       var o = ownOf(t);
       p.tracks.push({ f: t.name, s: t.subject, c: t.course || '', no: t.no, t: titleOf(t), pc: o.pc, ls: Math.round(o.ls), lc: Math.round(o.lc),
-        lp: t.lastPlayedAt || 0, st: t.status || 'none', sa: t.statusAt || 0, pos: Math.round(t.lastPos || 0), pa: t.posAt || 0 });
+        lp: t.lastPlayedAt || 0, st: t.status || 'none', sa: t.statusAt || 0, pos: Math.round(t.lastPos || 0), pa: t.posAt || 0, ca: t.cat || 0 });
     });
     Object.keys(sdirty.d).forEach(function (k) {
       p.snapD[k] = sdirty.d[k];
@@ -876,7 +954,7 @@
   }
   function applyPull(j) {
     if (!j || !j.tracks) return;
-    var devs = {}, rowsBy = {}, latest = null;
+    var devs = {}, rowsBy = {}, latest = null, reGroup = {};
     var playingId = cur && curUrl && !audio.paused ? cur.id : null;
     j.tracks.forEach(function (r) { devs[r.d] = r.dn || ''; (rowsBy[r.f] = rowsBy[r.f] || []).push(r); });
     (j.daily || []).forEach(function (r) { if (!(r.d in devs)) devs[r.d] = ''; });
@@ -903,9 +981,19 @@
       rows.forEach(function (r) {
         if (r.lp > (t.lastPlayedAt || 0)) t.lastPlayedAt = r.lp;
         if (r.sa > (t.statusAt || 0)) { t.status = r.st; t.statusAt = r.sa; }
+        // ほかの端末で分類を変えていたら、新しいほうにそろえる
+        if (r.d !== deviceId && r.ca > (t.cat || 0) && r.s) {
+          reGroup[groupOf(t)] = 1;
+          setClass(t, String(r.s), String(r.c || ''), r.t ? String(r.t) : null, r.ca);
+          reGroup[groupOf(t)] = 1;
+        }
       });
       markDirty(t);
     });
+    if (Object.keys(reGroup).length) {
+      Object.keys(reGroup).forEach(function (g) { renumber(g).forEach(markDirty); });
+      sortTracks();
+    }
     // 日別
     var nb = {}, mineD = {}, keys = {};
     (j.daily || []).forEach(function (r) {
@@ -1473,7 +1561,7 @@
       app: 'studyAudioPlayer', version: APP_VERSION, savedAt: new Date().toISOString(),
       settings: settings, daily: daily, queue: queue,
       tracks: tracks.map(function (t) {
-        return { subject: t.subject, course: t.course || '', name: t.name, playCount: t.playCount, lastPlayedAt: t.lastPlayedAt, listenedSec: t.listenedSec,
+        return { subject: t.subject, course: t.course || '', title: titleOf(t), cat: t.cat || 0, name: t.name, playCount: t.playCount, lastPlayedAt: t.lastPlayedAt, listenedSec: t.listenedSec,
           lectureSec: t.lectureSec, lapLec: t.lapLec, status: t.status, lastPos: t.lastPos };
       })
     };
@@ -1485,12 +1573,13 @@
     try { data = JSON.parse(text.replace(/^﻿/, '')); } catch (e) { toast('読めないファイルです'); return; }
     if (!data || data.app !== 'studyAudioPlayer') { toast('このアプリの履歴ファイルではありません'); return; }
     if (!confirm('履歴を読み込みます。同じ科目・同じファイル名の音声の記録を、ファイルの記録で置きかえます。日別の記録は多いほうを残します。（GAS の同期を使っているときは、これは使わずに同じ URL を入れるだけで記録がそろいます）よろしいですか？')) return;
-    var hit = 0, miss = 0;
+    var hit = 0, miss = 0, reClass = false;
     (data.tracks || []).forEach(function (b) {
       var t = null;
       for (var i = 0; i < tracks.length; i++) if (tracks[i].name === b.name) { t = tracks[i]; break; }
       if (!t) { miss++; return; }
-      if (b.subject && t.subject !== b.subject && !parseName(t.name)) { t.subject = b.subject; }
+      if (b.cat && b.cat > (t.cat || 0) && b.subject) { setClass(t, b.subject, b.course || '', b.title || null, b.cat); reClass = true; }
+      else if (b.subject && t.subject !== b.subject && !parseName(t.name)) { t.subject = b.subject; reClass = true; }
       ['playCount', 'lastPlayedAt', 'listenedSec', 'lectureSec', 'lapLec', 'status', 'lastPos'].forEach(function (f) { if (b[f] !== undefined) t[f] = b[f]; });
       markDirty(t); hit++;
     });
@@ -1499,6 +1588,7 @@
       if (!y || x.r > y.r) daily[k] = { r: x.r || 0, l: x.l || 0 };
     });
     lsSet(K.daily, daily);
+    if (reClass) { groups().forEach(function (g) { renumber(g).forEach(markDirty); }); sortTracks(); }
     await saveDirty();
     renderAll();
     toast(hit + ' 件の記録を戻しました' + (miss ? '（音声がまだない ' + miss + ' 件は飛ばしました）' : ''), 5000);
@@ -1640,6 +1730,16 @@
         toast('差し替えできませんでした。スマホの空き容量が足りないかもしれません', 6000);
       });
     });
+    $('btnEditTrack').addEventListener('click', function () { if (cur) openEdit(cur); });
+    $('btnEditGroup').addEventListener('click', function () {
+      var g = $('delSubject').value;
+      if (g) openEdit(null, g);
+    });
+    $('btnCloseEdit').addEventListener('click', function () { $('editModal').classList.add('hidden'); });
+    $('btnEditCancel').addEventListener('click', function () { $('editModal').classList.add('hidden'); });
+    $('btnEditSave').addEventListener('click', function () { saveEdit().catch(function (e) { console.error(e); toast('変えられませんでした：' + errMsg(e), 5000); }); });
+    $('eSubject').addEventListener('input', fillEditLists);
+    [].forEach.call(document.getElementsByName('editScope'), function (r) { r.addEventListener('change', syncEditScope); });
     $('btnOffTrack').addEventListener('click', function () {
       if (!cur) return;
       confirmRemove([cur]).then(function (list) {
