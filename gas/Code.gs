@@ -1,5 +1,5 @@
 /**
- * 学習音声プレーヤー ⇔ Google スプレッドシート 同期用 GAS（v1.2.0）
+ * 学習音声プレーヤー ⇔ Google スプレッドシート 同期用 GAS（v1.4.0）
  *
  * 使い方：記録用のスプレッドシートを開き「拡張機能 → Apps Script」にこのコードを貼る
  *         → 「デプロイ → 新しいデプロイ → ウェブアプリ」（実行するユーザー：自分／アクセス：全員）
@@ -15,6 +15,10 @@
  *   単元マスタ … 全端末を合わせた 周回数・累積時間・最終聴取日・理解度（毎回作り直す）
  *   日別       … 全端末を合わせた 日ごとの聴取時間（毎回作り直す）
  *   同期_単元・同期_日別 … 同期の元データ（手で直さない）
+ *
+ * Drive から取り込む（v1.4.0）
+ *   Drive の「034_講義録音」（無ければ「講義録音」、それも無ければ作る）にある音声を、アプリへ少しずつ渡す。
+ *   渡すのはこのフォルダの中のファイルだけ。
  */
 
 // 合言葉（使わないので空のまま。URL を知っている人だけが送れる）
@@ -37,11 +41,22 @@ var EVENT_NAME = {
 };
 var STATUS_LABEL = { none: '未評価', good: '◎ 完璧', again: '△ もう一度', text: '× 要テキスト確認' };
 
+// 音声を置くフォルダ（左から順に探して、最初に見つかったものを使う。どれも無ければ「講義録音」を作る）
+var DRIVE_FOLDERS = ['034_講義録音', '講義録音'];
+var DRIVE_CHUNK = 6 * 1024 * 1024;   // 1 回に渡す大きさ（6MB → 文字にして約 8MB）
+
 function doPost(e) {
+  var body;
+  try { body = JSON.parse((e && e.postData && e.postData.contents) || '{}'); }
+  catch (err) { return json_({ ok: false, error: '送られた中身が読めません' }); }
+  // Drive の読み出しは記録を書かないので、順番待ち（ロック）なしで答える
+  if (body.action === 'driveList' || body.action === 'driveChunk') {
+    try { return json_(body.action === 'driveList' ? driveList_() : driveChunk_(String(body.id || ''), Number(body.offset) || 0)); }
+    catch (err) { return json_({ ok: false, error: String(err && err.message || err) }); }
+  }
   var lock = LockService.getScriptLock();
   try {
     lock.waitLock(25000);
-    var body = JSON.parse((e && e.postData && e.postData.contents) || '{}');
     if (SECRET && body.secret !== SECRET) return json_({ ok: false, error: '合言葉が違います' });
     var ss = SpreadsheetApp.getActiveSpreadsheet();
     var added = appendLogs_(ss, body.logs || [], body.deviceName || '');
@@ -75,13 +90,18 @@ function setup() {
   sheet_(ss, DAILY_SHEET, DAILY_HEAD);
   sheet_(ss, SYNC_T_SHEET, SYNC_T_HEAD);
   sheet_(ss, SYNC_D_SHEET, SYNC_D_HEAD);
+  driveFolder_();   // Drive を使う許可もここで出してもらう
+  // 音声を少しずつ取り出すための「外部への接続」の許可もここで出してもらう
+  UrlFetchApp.fetch('https://www.googleapis.com/drive/v3/about?fields=user', {
+    headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() }, muteHttpExceptions: true
+  });
   var first = ss.getSheetByName('シート1');
   if (first && first.getLastRow() === 0 && ss.getSheets().length > 1) ss.deleteSheet(first);
 }
 
 // ブラウザで URL を開いたときの確認用
 function doGet() {
-  return json_({ ok: true, message: '学習音声プレーヤーの受け口は動いています（v1.2.0）' });
+  return json_({ ok: true, message: '学習音声プレーヤーの受け口は動いています（v1.4.0）' });
 }
 
 function json_(obj) {
@@ -222,4 +242,58 @@ function rebuildDaily_(ss, syncRows) {
   var sh = sheet_(ss, DAILY_SHEET, DAILY_HEAD);
   if (out.length) sh.getRange(2, 1, out.length, 1).setNumberFormat('@');
   writeRows_(sh, out, DAILY_HEAD.length);
+}
+
+/* ---------- Drive から取り込む ---------- */
+function driveFolder_() {
+  for (var i = 0; i < DRIVE_FOLDERS.length; i++) {
+    var it = DriveApp.getFoldersByName(DRIVE_FOLDERS[i]);
+    if (it.hasNext()) return it.next();
+  }
+  return DriveApp.createFolder(DRIVE_FOLDERS[DRIVE_FOLDERS.length - 1]);
+}
+function isAudio_(name, mime) {
+  return /\.(mp3|m4a|aac|wav|ogg)$/i.test(name) || /^audio\//.test(mime || '');
+}
+// フォルダの中の音声の一覧
+function driveList_() {
+  var folder = driveFolder_();
+  var out = [];
+  var it = folder.getFiles();
+  while (it.hasNext()) {
+    var f = it.next();
+    var name = f.getName(), size = f.getSize();
+    if (!isAudio_(name, f.getMimeType()) || size <= 0) continue;
+    out.push({ id: f.getId(), name: name, size: size, updated: f.getLastUpdated().getTime(), type: f.getMimeType() });
+  }
+  return { ok: true, folder: folder.getName(), files: out };
+}
+// 1 つのファイルの offset から DRIVE_CHUNK だけを文字（base64）にして渡す
+function driveChunk_(id, offset) {
+  if (!id) throw new Error('ファイルの指定がありません');
+  var folderId = driveFolder_().getId();
+  var file = DriveApp.getFileById(id);
+  var inFolder = false, ps = file.getParents();
+  while (ps.hasNext()) { if (ps.next().getId() === folderId) { inFolder = true; break; } }
+  if (!inFolder) throw new Error('音声のフォルダのファイルではありません');
+  var size = file.getSize();
+  if (offset < 0 || offset >= size) throw new Error('読む場所がファイルの外です');
+  var end = Math.min(offset + DRIVE_CHUNK, size) - 1;
+  var bytes = null, via = 'range', why = '';
+  // 必要な部分だけを Drive から取る（ファイル全体を読まない）。「外部への接続」の許可が無いときは下のやり方
+  try {
+    var res = UrlFetchApp.fetch('https://www.googleapis.com/drive/v3/files/' + encodeURIComponent(id) + '?alt=media', {
+      headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken(), Range: 'bytes=' + offset + '-' + end },
+      muteHttpExceptions: true
+    });
+    var code = res.getResponseCode();
+    if (code !== 206 && code !== 200) why = code + ' ' + res.getContentText().slice(0, 200);
+    if (code === 206 || code === 200) {
+      bytes = res.getContent();
+      if (code === 200 && (offset > 0 || bytes.length > end + 1)) bytes = bytes.slice(offset, end + 1);
+    }
+  } catch (err) { bytes = null; why = String(err && err.message || err).slice(0, 200); }
+  // ファイルを丸ごと読んで、要る部分を切り出す（遅いが許可は Drive だけで済む）
+  if (!bytes) { via = 'whole'; bytes = file.getBlob().getBytes().slice(offset, end + 1); }
+  return { ok: true, size: size, offset: offset, length: bytes.length, via: via, why: why, data: Utilities.base64Encode(bytes) };
 }

@@ -76,6 +76,7 @@
       <label class="btn primary file-btn">＋ MP3を取り込む
         <input id="fileInput" type="file" accept="audio/*,.mp3,.m4a" multiple>
       </label>
+      <button class="btn" id="btnDrive" type="button">☁ Drive から取り込む</button>
     </div>
     <div class="filters">
       <select id="fSubject" class="select"></select>
@@ -192,6 +193,28 @@
       <button class="btn danger" id="btnDelAll" type="button">音声と記録をすべて消す</button>
     </div>
     <div class="hint" id="verInfo"></div>
+  </div>
+</div>
+
+<!-- Drive から取り込む -->
+<div id="driveModal" class="modal hidden">
+  <div class="modal-body">
+    <div class="modal-head">
+      <h2>Drive から取り込む</h2>
+      <button class="icon-btn" id="btnCloseDrive" type="button" aria-label="閉じる">✕</button>
+    </div>
+    <div class="hint" id="driveInfo">Google ドライブの「講義録音」フォルダにある音声です。</div>
+    <div class="btn-row">
+      <button class="btn" id="btnDriveAll" type="button">まだのものを全部選ぶ</button>
+      <button class="btn" id="btnDriveNone" type="button">選ぶのをやめる</button>
+    </div>
+    <div id="driveList" class="drive-list"></div>
+    <div class="hint" id="driveProg"></div>
+    <div class="btn-row">
+      <button class="btn primary" id="btnDriveGo" type="button">選んだものを取り込む</button>
+      <button class="btn" id="btnDriveReload" type="button">一覧を読み直す</button>
+    </div>
+    <div class="hint">Wi-Fi のときがおすすめです（1 本 10〜30MB）。取り込みが終わるまで画面を消さないでください。</div>
   </div>
 </div>
 

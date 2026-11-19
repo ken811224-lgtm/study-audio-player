@@ -5,7 +5,7 @@
 (function () {
   'use strict';
 
-  var APP_VERSION = '1.3.1';
+  var APP_VERSION = '1.4.0';
   var RATES = [1.0, 1.3, 1.5, 1.8, 2.0, 2.2];
   var STATUS_LIST = [
     { key: 'none', label: '未評価', mark: '' },
@@ -142,6 +142,7 @@
     });
   }
   function readFile(file) {
+    if (file && file._buf) return Promise.resolve(file._buf);   // Drive から取ってきたもの
     return new Promise(function (res, rej) {
       var fr = new FileReader();
       fr.onload = function () { res(fr.result); };
@@ -209,7 +210,22 @@
       .catch(function (e) { console.warn(e); });
   }
 
-  async function importFiles(fileList, subject) {
+  // もう取り込んである講義（同じ科目・コースで、名前が同じ。録り直しの「_2」も同じとみなす）
+  function infoOf(name, subject) {
+    return parseName(name) || { subject: (subject || '').trim() || '未分類', course: '', title: String(name).replace(/\.[^.]+$/, '') };
+  }
+  function findSame(info, name) {
+    var key = sameKey(name);
+    for (var j = 0; j < tracks.length; j++) {
+      var t0 = tracks[j];
+      if (t0.subject === info.subject && (t0.course || '') === info.course && sameKey(t0.name) === key) return t0;
+    }
+    return null;
+  }
+
+  // opts.replace … 同じ講義があれば聞かずに差し替える（Drive で選んだとき）
+  async function importFiles(fileList, subject, opts) {
+    opts = opts || {};
     subject = (subject || '').trim() || '未分類';
     var touched = {}, lastGroup = '';
     var files = [].slice.call(fileList).filter(function (f) {
@@ -222,20 +238,13 @@
     }
     // 消されにくくするお願い。古い iPhone では返事が来ないことがあるので待たない
     if (navigator.storage && navigator.storage.persist) { try { navigator.storage.persist().catch(function () {}); } catch (e) { /* 無視 */ } }
-    // もう取り込んである講義（同じ科目・コースで、名前が同じ。録り直しの「_2」も同じとみなす）
     var plan = files.map(function (f) {
-      var pn = parseName(f.name);
-      var info = pn || { subject: subject, course: '', title: f.name.replace(/\.[^.]+$/, '') };
-      var key = sameKey(f.name), match = null;
-      for (var j = 0; j < tracks.length; j++) {
-        var t0 = tracks[j];
-        if (t0.subject === info.subject && (t0.course || '') === info.course && sameKey(t0.name) === key) { match = t0; break; }
-      }
-      return { f: f, info: info, match: match };
+      var info = infoOf(f.name, subject);
+      return { f: f, info: info, match: findSame(info, f.name) };
     });
     var dups = plan.filter(function (p) { return p.match; });
-    var doReplace = false;
-    if (dups.length) {
+    var doReplace = !!opts.replace;
+    if (dups.length && !doReplace) {
       var names = dups.slice(0, 5).map(function (p) { return '・' + p.f.name; }).join('\n') + (dups.length > 5 ? '\n…ほか ' + (dups.length - 5) + ' 件' : '');
       doReplace = confirm('次の ' + dups.length + ' 件は、もう取り込んであります。\n' + names +
         '\n\n［OK］音声だけ差し替える（周回数・聴取時間・理解度はそのまま。続きの位置は最初に戻る）\n［キャンセル］この ' + dups.length + ' 件は取り込まない');
@@ -261,6 +270,7 @@
           playCount: 0, lastPlayedAt: 0, listenedSec: 0, lectureSec: 0, lapLec: 0,
           status: 'none', lastPos: 0, addedAt: Date.now()
         };
+        if (f.driveId) { t.driveId = f.driveId; t.driveUpdated = f.driveUpdated || 0; }
         tracks.push(t);
         await idbPut('tracks', t);
         lastGroup = groupOf(t);
@@ -287,6 +297,130 @@
     toast(msg.join('　'), 5000);
   }
 
+  /* ---------- Drive から取り込む ---------- */
+  // GAS に聞いて返事（JSON）をもらう。電波などで失敗したら少し待ってやり直す
+  async function drivePost(obj, tries) {
+    tries = tries || 3;
+    for (var n = 1; ; n++) {
+      var fatal = false;
+      try {
+        var res = await fetch(settings.gasUrl, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify(obj), redirect: 'follow' });
+        var txt = await res.text(), j = null;
+        try { j = JSON.parse(txt); } catch (e) { /* JSON でない */ }
+        if (j && j.ok) return j;
+        if (j && j.error) fatal = true;   // GAS が「だめ」と答えた（やり直しても同じ）
+        throw new Error((j && j.error) || ('返事が読めません（' + res.status + '）'));
+      } catch (e) {
+        if (fatal || n >= tries) throw e;
+        await new Promise(function (r) { setTimeout(r, 1500 * n); });
+      }
+    }
+  }
+  // 1 本を少しずつ受け取ってつなげる
+  async function driveDownload(f, onProgress) {
+    var out = new Uint8Array(f.size), off = 0;
+    while (off < f.size) {
+      var j = await drivePost({ action: 'driveChunk', id: f.id, offset: off });
+      var bin = atob(j.data), len = bin.length;
+      if (!len) throw new Error('Drive から中身が来ませんでした');
+      for (var i = 0; i < len; i++) out[off + i] = bin.charCodeAt(i);
+      bin = null;
+      off += len;
+      if (onProgress) onProgress(off / f.size);
+    }
+    return out.buffer;
+  }
+  // Drive のファイルと手元の講義をくらべる：new まだ／have 取り込み済み／newer Drive の方が新しい／diff 中身が違うかも
+  function driveState(f) {
+    var t = findSame(infoOf(f.name, settings.subject), f.name);
+    if (!t) return { st: 'new' };
+    if (t.driveId === f.id) return { st: (f.updated > (t.driveUpdated || 0) + 1000) ? 'newer' : 'have', t: t };
+    if (t.size === f.size) return { st: 'have', t: t };
+    return { st: 'diff', t: t };
+  }
+  var DRIVE_LABEL = {
+    'new': 'まだ取り込んでいません', have: '取り込み済み',
+    newer: 'Drive の方が新しくなっています（録り直し？）', diff: '取り込み済みのものと大きさが違います（差し替えるならチェック）'
+  };
+  var driveFiles = [], driveBusy = false;
+  function fmtMB(b) { return (b / 1048576).toFixed(1) + 'MB'; }
+  function renderDrive() {
+    var box = $('driveList');
+    box.innerHTML = '';
+    if (!driveFiles.length) { box.innerHTML = '<div class="hint" style="padding:10px 2px">音声がありません。</div>'; return; }
+    driveFiles.forEach(function (f) {
+      var row = document.createElement('label');
+      row.className = 'drv-row ' + f.state.st;
+      var cb = document.createElement('input');
+      cb.type = 'checkbox'; cb.checked = !!f.checked; cb.disabled = driveBusy;
+      cb.addEventListener('change', function () { f.checked = this.checked; });
+      var txt = document.createElement('div');
+      var nm = document.createElement('div'); nm.className = 'drv-name'; nm.textContent = f.name;
+      var sub = document.createElement('div'); sub.className = 'drv-sub ' + f.state.st;
+      sub.textContent = fmtMB(f.size) + '・' + (f.prog != null ? f.prog : DRIVE_LABEL[f.state.st]);
+      txt.appendChild(nm); txt.appendChild(sub);
+      row.appendChild(cb); row.appendChild(txt);
+      box.appendChild(row);
+    });
+  }
+  async function loadDriveList() {
+    $('driveInfo').textContent = 'Drive の一覧を読んでいます…';
+    driveFiles = []; renderDrive();
+    $('driveList').innerHTML = '';
+    try {
+      var j = await drivePost({ action: 'driveList' }, 2);
+      driveFiles = (j.files || []).map(function (f) {
+        var st = driveState(f);
+        return { id: f.id, name: f.name, size: f.size, updated: f.updated, type: f.type, state: st, checked: st.st === 'new' || st.st === 'newer' };
+      });
+      driveFiles.sort(function (a, b) { return natcmp(a.name, b.name); });
+      var nNew = driveFiles.filter(function (f) { return f.checked; }).length;
+      $('driveInfo').textContent = 'Google ドライブの「' + (j.folder || '講義録音') + '」フォルダ：' + driveFiles.length + ' 本（まだのもの・新しくなったもの ' + nNew + ' 本）';
+    } catch (e) {
+      console.error(e);
+      $('driveInfo').textContent = 'Drive の一覧が読めませんでした：' + (e.message || e) + '（GAS の URL と電波を確かめてください）';
+    }
+    renderDrive();
+  }
+  function openDrive() {
+    if (!settings.gasUrl) { toast('先に ⚙ 設定で GAS の URL を入れてください', 5000); return; }
+    $('driveModal').classList.remove('hidden');
+    if (!driveBusy) { $('driveProg').textContent = ''; loadDriveList(); }
+  }
+  async function runDriveImport() {
+    if (driveBusy) return;
+    var pick = driveFiles.filter(function (f) { return f.checked; });
+    if (!pick.length) { toast('取り込むものにチェックを付けてください'); return; }
+    if (navigator.onLine === false) { toast('いまは圏外です'); return; }
+    driveBusy = true; renderDrive();
+    var done = 0, failed = 0;
+    for (var i = 0; i < pick.length; i++) {
+      var f = pick[i];
+      var head = (i + 1) + ' / ' + pick.length + ' 本目　';
+      try {
+        f.prog = '受け取り中 0%'; renderDrive();
+        $('driveProg').textContent = head + f.name;
+        var buf = await driveDownload(f, function (r) {
+          f.prog = '受け取り中 ' + Math.floor(r * 100) + '%'; renderDrive();
+          $('driveProg').textContent = head + Math.floor(r * 100) + '%　' + f.name;
+        });
+        f.prog = 'しまっています…'; renderDrive();
+        await importFiles([{ name: f.name, type: f.type || 'audio/mpeg', size: f.size, _buf: buf, driveId: f.id, driveUpdated: f.updated }], settings.subject, { replace: true });
+        buf = null;
+        f.state = driveState(f); f.checked = false; f.prog = null;
+        done++;
+      } catch (e) {
+        console.error(e);
+        f.prog = '止まりました：' + (e.message || e.name || e);
+        failed++;
+      }
+      renderDrive();
+    }
+    driveBusy = false; renderDrive();
+    $('driveProg').textContent = done + ' 本取り込みました' + (failed ? '（' + failed + ' 本は止まりました。チェックを付け直して［選んだものを取り込む］でやり直せます）' : '');
+    toast($('driveProg').textContent, 5000);
+  }
+
   // 録り直しのファイル名の「_2」「_3」と拡張子をのけて比べる
   function sameKey(name) {
     return String(name).replace(/\.[^.]+$/, '').replace(/_\d+$/, '').trim();
@@ -303,6 +437,7 @@
     t.lastPos = 0;
     t.lapLec = 0;
     t.replacedAt = Date.now();
+    if (file.driveId) { t.driveId = file.driveId; t.driveUpdated = file.driveUpdated || 0; }
     markDirty(t);
     await saveDirty();
     var last = lsGet(K.last, null);
@@ -1274,6 +1409,24 @@
         console.error(e);
         toast('取り込みで止まりました：' + ((e && (e.name + ' ' + (e.message || ''))) || e), 8000);
       }).then(function () { importing = false; });
+    });
+
+    $('btnDrive').addEventListener('click', openDrive);
+    $('btnCloseDrive').addEventListener('click', function () {
+      if (driveBusy && !confirm('取り込みの途中です。閉じても裏で続きます。閉じますか？')) return;
+      $('driveModal').classList.add('hidden');
+    });
+    $('btnDriveReload').addEventListener('click', function () { if (!driveBusy) loadDriveList(); });
+    $('btnDriveGo').addEventListener('click', runDriveImport);
+    $('btnDriveAll').addEventListener('click', function () {
+      if (driveBusy) return;
+      driveFiles.forEach(function (f) { f.checked = f.state.st === 'new' || f.state.st === 'newer'; });
+      renderDrive();
+    });
+    $('btnDriveNone').addEventListener('click', function () {
+      if (driveBusy) return;
+      driveFiles.forEach(function (f) { f.checked = false; });
+      renderDrive();
     });
 
     $('statusRow').addEventListener('click', function (e) {

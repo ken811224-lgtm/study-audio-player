@@ -101,7 +101,7 @@ main { padding: 12px 12px 210px; max-width: 720px; margin: 0 auto; }
 .tab.active { color: var(--text); border-bottom-color: var(--accent); font-weight: bold; }
 
 /* 取り込み・絞り込み */
-.import-box { display: -webkit-box; display: -webkit-flex; display: flex; margin-bottom: 8px; }
+.import-box { display: -webkit-box; display: -webkit-flex; display: flex; -webkit-flex-wrap: wrap; flex-wrap: wrap; margin-bottom: 8px; }
 .import-box .input { -webkit-flex: 1; flex: 1; margin-right: 8px; min-width: 0; }
 .input, .select {
   background: var(--bg2); border: 1px solid var(--line); border-radius: 10px; padding: 9px 10px; width: 100%;
@@ -239,3 +239,14 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 18px;
   .stat-num { font-size: 17px; }
   .rate { font-size: 12px; }
 }
+
+/* Drive から取り込む */
+#btnDrive { -webkit-flex: 0 0 100%; flex: 0 0 100%; margin-top: 8px; }
+.drive-list { margin: 8px 0; max-height: 50vh; overflow-y: auto; -webkit-overflow-scrolling: touch; border-top: 1px solid rgba(255,255,255,.08); }
+.drv-row { display: flex; align-items: flex-start; padding: 10px 2px; border-bottom: 1px solid rgba(255,255,255,.08); }
+.drv-row input { margin: 3px 10px 0 0; width: 20px; height: 20px; flex: 0 0 auto; }
+.drv-name { font-size: 14px; line-height: 1.4; word-break: break-all; }
+.drv-sub { font-size: 12px; color: var(--sub); margin-top: 2px; }
+.drv-sub.new { color: #7bd88f; }
+.drv-sub.newer { color: #f5c060; }
+.drv-row.have .drv-name { color: var(--sub); }
