@@ -5,7 +5,7 @@
 (function () {
   'use strict';
 
-  var APP_VERSION = '1.7.1';
+  var APP_VERSION = '1.7.2';
   var RATES = [1.0, 1.3, 1.5, 1.8, 2.0, 2.2];
   var STATUS_LIST = [
     { key: 'none', label: '未評価', mark: '' },
@@ -727,10 +727,43 @@
     if (curUrl) { URL.revokeObjectURL(curUrl); curUrl = null; }
   }
 
+  // iPhone は「押した瞬間」に呼んだ play() しか許さない。音声は保存場所から読み出してからになるので、
+  // 立ち上げ後の最初の 1 回だけ、押した瞬間に無音を流して audio 要素の再生の許可を取っておく
+  var unlocked = false, unlocking = false;
+  function silentUrl() {
+    var n = 800, s, i;
+    function u32(x) { return String.fromCharCode(x & 255, (x >> 8) & 255, (x >> 16) & 255, (x >> 24) & 255); }
+    function u16(x) { return String.fromCharCode(x & 255, (x >> 8) & 255); }
+    s = 'RIFF' + u32(36 + n) + 'WAVEfmt ' + u32(16) + u16(1) + u16(1) + u32(8000) + u32(8000) + u16(1) + u16(8) + 'data' + u32(n);
+    for (i = 0; i < n; i++) s += '\x80';
+    return 'data:audio/wav;base64,' + btoa(s);
+  }
+  function unlockAudio() {
+    if (unlocked || cur) return;
+    unlocked = true; unlocking = true;
+    dlog('再生の許可を取る');
+    audio.loop = true;                  // 読み出しの間に終わらないように
+    audio.src = silentUrl();
+    var p = audio.play();
+    if (p && p.catch) p.catch(function (e) { dlog('無音の再生 ' + (e && e.name)); });
+  }
+  function endUnlock(stop) {
+    if (!unlocking) return;
+    unlocking = false;
+    audio.loop = false;
+    if (stop) {                         // 音声が用意できなかったとき：無音を止めて、次に押したときに取り直す
+      unlocked = false;
+      audio.pause();
+      audio.removeAttribute('src');
+      try { audio.load(); } catch (e) { /* 無視 */ }
+    }
+  }
+
   var fetchingId = null;
   async function loadTrack(id, startPos, autoplay) {
     var t = byId[id];
     if (!t) return;
+    if (autoplay) unlockAudio();        // await より前（押した瞬間）に呼ぶ
     if (t.offline) {
       if (fetchingId) { toast('いま Drive から受け取り中です。終わるまで待ってください', 3000); return; }
       fetchingId = id;
@@ -740,6 +773,7 @@
         if (changed) startPos = 0;
       } catch (e) {
         console.error(e);
+        endUnlock(true);
         toast('Drive から受け取れませんでした：' + errMsg(e), 7000);
         return;
       } finally { fetchingId = null; }
@@ -749,8 +783,9 @@
     }
     accumulate();
     flushSession('switch');
-    var rec = await idbGet('audio', id);
-    if (!rec) { toast('音声の中身が見つかりません。取り込み直してください', 5000); return; }
+    var rec = null;
+    try { rec = await idbGet('audio', id); } catch (e) { console.error(e); }
+    if (!rec) { endUnlock(true); toast('音声の中身が見つかりません。取り込み直してください', 5000); return; }
     var type = rec.type || 'audio/mpeg';
     var stored = !!rec.blob;            // Blob のまま入っていれば、コピーせずにそのまま使う
     var blob = stored ? rec.blob : new Blob([rec.data], { type: type });
@@ -767,6 +802,7 @@
     cur = t;
     pendingSeek = Math.max(0, startPos || 0);
     lastMedia = null;
+    endUnlock(false);
     dlog('音声を読み込む 続き=' + pendingSeek.toFixed(1));
     audio.src = curUrl;                 // 同じ audio 要素の src だけ差し替える
     applyRate();
