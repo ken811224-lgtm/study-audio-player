@@ -2,7 +2,7 @@
  * 音声そのものは IndexedDB に入っているので、ここではしまわない
  * 版を上げたら CACHE の名前も変える（変えると新しい部品に入れかわる）
  */
-var CACHE = 'sap-v1.7.3';
+var CACHE = 'sap-v1.7.4';
 var FILES = [
   './',
   'index.html',
@@ -24,7 +24,7 @@ self.addEventListener('install', function (e) {
 self.addEventListener('activate', function (e) {
   e.waitUntil(
     caches.keys().then(function (keys) {
-      return Promise.all(keys.filter(function (k) { return k !== CACHE; }).map(function (k) { return caches.delete(k); }));
+      return Promise.all(keys.filter(function (k) { return k.indexOf('sap-') === 0 && k !== CACHE; }).map(function (k) { return caches.delete(k); }));
     }).then(function () { return self.clients.claim(); })
   );
 });
