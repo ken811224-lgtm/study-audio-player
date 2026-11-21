@@ -5,7 +5,7 @@
 (function () {
   'use strict';
 
-  var APP_VERSION = '1.7.0';
+  var APP_VERSION = '1.7.1';
   var RATES = [1.0, 1.3, 1.5, 1.8, 2.0, 2.2];
   var STATUS_LIST = [
     { key: 'none', label: '未評価', mark: '' },
@@ -767,6 +767,7 @@
     cur = t;
     pendingSeek = Math.max(0, startPos || 0);
     lastMedia = null;
+    dlog('音声を読み込む 続き=' + pendingSeek.toFixed(1));
     audio.src = curUrl;                 // 同じ audio 要素の src だけ差し替える
     applyRate();
     if (autoplay) playAudio();
@@ -777,7 +778,9 @@
 
   function playAudio() {
     applyRate();
+    dlog('play()を呼ぶ');
     var p = audio.play();
+    if (p && p.then) p.then(function () { dlog('play()成功'); }, function (e) { dlog('play()失敗 ' + (e && e.name)); });
     if (p && p.catch) {
       p.catch(function (e) {
         console.warn(e);
@@ -1185,7 +1188,8 @@
     if (pendingSeek > 0) {
       var s = pendingSeek; pendingSeek = 0;
       if (audio.duration && s > audio.duration - 2) s = 0;
-      try { audio.currentTime = s; } catch (e) { /* 無視 */ }
+      dlog('続きへ移動 ' + s.toFixed(1));
+      try { audio.currentTime = s; } catch (e) { dlog('移動失敗 ' + e.name); }
     }
     applyRate();
     updatePositionState();
@@ -1256,6 +1260,89 @@
       console.error(e);
       toast('音声の中身が読めませんでした。Drive から取り込み直してください', 6000);
     }
+  }
+
+  /* ---------- 確認表示（v1.7.1：立ち上げ直後に時間が進まない原因を調べるため。原因が分かったら外す） ---------- */
+  var diag = { t0: Date.now(), log: [], tu: 0, tuLogged: 0, lastCt: -1, stuck: 0, maxStuck: 0, el: null, pre: null, open: true };
+  function dlog(m) {
+    var sec = ((Date.now() - diag.t0) / 1000).toFixed(1);
+    diag.log.push(sec + 's ' + m + ' 位置=' + (audio.currentTime || 0).toFixed(2) + ' rs=' + audio.readyState + (audio.seeking ? ' 移動中' : ''));
+    if (diag.log.length > 40) diag.log.splice(30, 1);   // 始めの 30 行は残す
+  }
+  ['loadstart', 'loadedmetadata', 'loadeddata', 'canplay', 'canplaythrough', 'play', 'playing', 'waiting', 'stalled',
+    'suspend', 'seeking', 'seeked', 'pause', 'ended', 'error', 'emptied'].forEach(function (n) {
+    audio.addEventListener(n, function () { dlog(n); });
+  });
+  audio.addEventListener('loadstart', function () { diag.tuLogged = 0; diag.stuck = 0; diag.lastCt = -1; });
+  audio.addEventListener('timeupdate', function () {
+    diag.tu++;
+    if (diag.tuLogged < 5) { diag.tuLogged++; dlog('timeupdate'); }
+  });
+  function diagEnd(r) {
+    try { return r.length ? r.end(r.length - 1).toFixed(1) : '-'; } catch (e) { return '?'; }
+  }
+  function diagText() {
+    var ct = audio.currentTime || 0;
+    var judge = !cur ? 'まだ再生していません' : audio.paused ? '止めています' :
+      diag.stuck >= 2 ? '★再生中なのに位置が止まっています（' + diag.stuck.toFixed(1) + ' 秒）' : '位置は進んでいます';
+    var d = daily[today()] || { r: 0 };
+    return '【確認表示 v' + APP_VERSION + '】' + judge + '\n' +
+      '位置 ' + ct.toFixed(2) + ' / 長さ ' + (audio.duration || 0).toFixed(1) + '　画面 ' + $('tCur').textContent + '\n' +
+      '止まった最長 ' + diag.maxStuck.toFixed(1) + ' 秒　timeupdate ' + diag.tu + ' 回　今日の記録 ' + Math.round(d.r || 0) + ' 秒\n' +
+      'paused=' + audio.paused + ' seeking=' + audio.seeking + ' rs=' + audio.readyState + ' ns=' + audio.networkState +
+      ' 移動待ち=' + pendingSeek.toFixed(1) + ' 速度=' + audio.playbackRate + '\n' +
+      '読込済み ' + diagEnd(audio.buffered) + '　移動できる所 ' + diagEnd(audio.seekable) + '　err=' + (audio.error ? audio.error.code : '-') + '\n' +
+      navigator.userAgent + '\n--- 経過 ---\n' + diag.log.join('\n');
+  }
+  function diagCopy(btn) {
+    var ta = document.createElement('textarea');
+    ta.value = diagText();
+    ta.readOnly = true;
+    ta.style.cssText = 'position:fixed;top:0;left:0;width:1px;height:1px;opacity:0;font-size:16px';
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.setSelectionRange(0, ta.value.length);
+    var ok = false;
+    try { ok = document.execCommand('copy'); } catch (e) { /* 無視 */ }
+    document.body.removeChild(ta);
+    btn.style.background = ok ? '#2e7d4f' : '#a33';
+    btn.textContent = ok ? 'コピーした' : 'コピー不可';
+    setTimeout(function () { btn.style.background = ''; btn.textContent = 'コピー'; }, 1800);
+  }
+  function diagTick() {
+    var ct = audio.currentTime || 0;
+    if (cur && !audio.paused && !audio.ended && ct === diag.lastCt) {
+      diag.stuck += 0.5;
+      if (diag.stuck > diag.maxStuck) diag.maxStuck = diag.stuck;
+    } else diag.stuck = 0;
+    diag.lastCt = ct;
+    if (diag.open && diag.pre) diag.pre.textContent = diagText();
+  }
+  function setupDiag() {
+    var box = document.createElement('section');
+    box.style.cssText = 'border:1px solid #d9a441;border-radius:10px;padding:8px;margin-bottom:10px;background:#1b1a12';
+    var row = document.createElement('div');
+    row.style.cssText = 'display:flex;justify-content:flex-end;margin-bottom:4px';
+    var bCopy = document.createElement('button');
+    bCopy.type = 'button'; bCopy.className = 'mini'; bCopy.textContent = 'コピー'; bCopy.style.marginRight = '6px';
+    bCopy.addEventListener('click', function () { diagCopy(bCopy); });
+    var bFold = document.createElement('button');
+    bFold.type = 'button'; bFold.className = 'mini'; bFold.textContent = 'たたむ';
+    var pre = document.createElement('pre');
+    pre.style.cssText = 'margin:0;font:12px/1.45 monospace;white-space:pre-wrap;word-break:break-all;max-height:190px;overflow-y:auto;-webkit-overflow-scrolling:touch';
+    bFold.addEventListener('click', function () {
+      diag.open = !diag.open;
+      pre.style.display = diag.open ? '' : 'none';
+      bFold.textContent = diag.open ? 'たたむ' : '確認表示を開く';
+      diagTick();
+    });
+    row.appendChild(bCopy); row.appendChild(bFold);
+    box.appendChild(row); box.appendChild(pre);
+    var main = $('main');
+    main.insertBefore(box, main.firstChild);
+    diag.el = box; diag.pre = pre;
+    diagTick();
+    setInterval(diagTick, 500);
   }
 
   /* ---------- 画面 ---------- */
@@ -1975,6 +2062,7 @@
   async function start() {
     $('verTop').textContent = 'v' + APP_VERSION;
     bind();
+    setupDiag();
     setupMediaSession();
     try {
       db = await openDB();
